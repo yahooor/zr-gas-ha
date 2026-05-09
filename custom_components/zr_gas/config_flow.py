@@ -270,6 +270,8 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         session = async_get_clientsession(self.hass)
         api = ZrGasAPI(session, access_token)
         try:
+            # Init request is required before token check
+            await api.init_request("")
             result = await api.check_token()
         except ZrGasAuthError as err:
             raise InvalidAuth from err
@@ -294,8 +296,9 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CannotConnect: If the API cannot be reached.
         """
         session = async_get_clientsession(self.hass)
-        api = ZrGasAPI(session, access_token)
+        api = ZrGasAPI(session, access_token, user_id=user_id)
         try:
+            await api.init_request(user_id)
             customers = await api.get_bind_gas_cust_list(user_id)
         except ZrGasAuthError as err:
             raise InvalidAuth from err

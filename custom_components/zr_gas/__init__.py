@@ -71,7 +71,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
 
     # Create API client
-    api = ZrGasAPI(session, access_token)
+    api = ZrGasAPI(session, access_token, user_id=user_id)
 
     # Create a coordinator for each customer account
     coordinators: dict[str, ZrGasDataUpdateCoordinator] = {}
@@ -242,7 +242,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             period = current_period
             unit_price = 0.0
 
-            bill_list: list[ZrGasBill] = bills if bills else []
+            bill_list: list[ZrGasBill] = bills if isinstance(bills, list) else []
             if bill_list:
                 latest_bill = bill_list[-1]
                 monthly_usage = latest_bill.usage_volume

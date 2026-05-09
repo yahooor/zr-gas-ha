@@ -65,15 +65,18 @@ class ZrGasAPI:
         self,
         session: aiohttp.ClientSession,
         access_token: str,
+        user_id: str = "",
     ) -> None:
         """Initialize the API client.
 
         Args:
             session: aiohttp client session for making HTTP requests.
             access_token: Access token obtained from the WeChat mini-program.
+            user_id: User identifier (passed as header in most API calls).
         """
         self._session = session
         self._access_token = access_token
+        self._user_id = user_id
         self._salt = SIGN_SALT
 
     def _generate_signature(self, param: str, timestamp: str) -> str:
@@ -135,6 +138,8 @@ class ZrGasAPI:
             "Accept": "*/*",
             "Accept-Language": "zh-CN,zh;q=0.9",
         }
+        if self._user_id:
+            request_headers["userId"] = self._user_id
         if headers:
             request_headers.update(headers)
 
@@ -147,6 +152,8 @@ class ZrGasAPI:
             kwargs["data"] = data
 
         async with self._session.post(url, **kwargs) as resp:
+            if resp.status in (401, 403):
+                raise ZrGasAuthError(f"HTTP {resp.status}: authentication failed")
             resp.raise_for_status()
             result: dict[str, Any] = await resp.json()
 
@@ -160,8 +167,8 @@ class ZrGasAPI:
         if status == 1:
             return result
 
-        # Token invalid/expired
-        if "token" in message.lower() or "登录" in message or status in (401, 403):
+        # Token invalid/expired based on response message
+        if "token" in message.lower() or "登录" in message:
             raise ZrGasAuthError(f"Auth failed: {message}")
 
         raise ZrGasApiError(f"API error (status={status}): {message}")
