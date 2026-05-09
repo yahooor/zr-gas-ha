@@ -112,10 +112,15 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         description_placeholders: dict[str, str] = {}
 
-        # Generate captcha URL for the clickable link
+        # Generate captcha URL and build description with markdown link
         if self._api:
             captcha_url = self._api.get_captcha_url(self._mobile)
-            description_placeholders["captcha_url"] = captcha_url
+            description_placeholders["captcha_info"] = (
+                "1. 点击下方链接，在新标签页打开验证码图片\n"
+                "2. 识别验证码后填入下方输入框\n"
+                "3. 点击提交，系统将发送短信验证码\n\n"
+                f"[点击查看验证码图片]({captcha_url})"
+            )
 
         if user_input is not None:
             captcha_code = user_input.get("captcha_code", "").strip()
@@ -134,7 +139,12 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "sms_send_failed"
                     # Refresh captcha URL on failure
                     captcha_url = self._api.get_captcha_url(self._mobile)
-                    description_placeholders["captcha_url"] = captcha_url
+                    description_placeholders["captcha_info"] = (
+                        "1. 点击下方链接，在新标签页打开验证码图片\n"
+                        "2. 识别验证码后填入下方输入框\n"
+                        "3. 点击提交，系统将发送短信验证码\n\n"
+                        f"[点击查看验证码图片]({captcha_url})"
+                    )
                 except Exception as err:
                     _LOGGER.error("Unexpected error sending SMS: %s", err)
                     errors["base"] = "connection_error"
@@ -308,7 +318,11 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if self._api:
             captcha_url = self._api.get_captcha_url(self._mobile)
-            description_placeholders["captcha_url"] = captcha_url
+            description_placeholders["captcha_info"] = (
+                "1. 点击下方链接打开验证码图片\n"
+                "2. 识别后填入输入框并提交\n\n"
+                f"[点击查看验证码图片]({captcha_url})"
+            )
             description_placeholders["mobile"] = (
                 f"{self._mobile[:3]}****{self._mobile[-4:]}"
                 if len(self._mobile) == 11
@@ -334,7 +348,12 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "sms_send_failed"
                     # Refresh captcha URL on failure
                     captcha_url = self._api.get_captcha_url(self._mobile)
-                    description_placeholders["captcha_url"] = captcha_url
+                    description_placeholders["captcha_info"] = (
+                        "1. 点击下方链接，在新标签页打开验证码图片\n"
+                        "2. 识别验证码后填入下方输入框\n"
+                        "3. 点击提交，系统将发送短信验证码\n\n"
+                        f"[点击查看验证码图片]({captcha_url})"
+                    )
                 except Exception as err:
                     _LOGGER.error("Unexpected error sending SMS: %s", err)
                     errors["base"] = "connection_error"
