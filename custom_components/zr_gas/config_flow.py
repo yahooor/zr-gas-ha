@@ -112,14 +112,14 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         description_placeholders: dict[str, str] = {}
 
-        # Generate captcha URL and build description with markdown link
+        # Generate captcha URL and build description with HTML link
         if self._api:
             captcha_url = self._api.get_captcha_url(self._mobile)
             description_placeholders["captcha_info"] = (
                 "1. 点击下方链接，在新标签页打开验证码图片\n"
                 "2. 识别验证码后填入下方输入框\n"
                 "3. 点击提交，系统将发送短信验证码\n\n"
-                f"[点击查看验证码图片]({captcha_url})"
+                f'<a href="{captcha_url}" target="_blank">点击查看验证码图片</a>'
             )
 
         if user_input is not None:
@@ -143,7 +143,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "1. 点击下方链接，在新标签页打开验证码图片\n"
                         "2. 识别验证码后填入下方输入框\n"
                         "3. 点击提交，系统将发送短信验证码\n\n"
-                        f"[点击查看验证码图片]({captcha_url})"
+                        f'<a href="{captcha_url}" target="_blank">点击查看验证码图片</a>'
                     )
                 except Exception as err:
                     _LOGGER.error("Unexpected error sending SMS: %s", err)
@@ -321,7 +321,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders["captcha_info"] = (
                 "1. 点击下方链接打开验证码图片\n"
                 "2. 识别后填入输入框并提交\n\n"
-                f"[点击查看验证码图片]({captcha_url})"
+                f'<a href="{captcha_url}" target="_blank">点击查看验证码图片</a>'
             )
             description_placeholders["mobile"] = (
                 f"{self._mobile[:3]}****{self._mobile[-4:]}"
@@ -352,7 +352,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "1. 点击下方链接，在新标签页打开验证码图片\n"
                         "2. 识别验证码后填入下方输入框\n"
                         "3. 点击提交，系统将发送短信验证码\n\n"
-                        f"[点击查看验证码图片]({captcha_url})"
+                        f'<a href="{captcha_url}" target="_blank">点击查看验证码图片</a>'
                     )
                 except Exception as err:
                     _LOGGER.error("Unexpected error sending SMS: %s", err)
