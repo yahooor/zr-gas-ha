@@ -1,0 +1,86 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ZR Gas Login",
+        "description": "Enter your registered mobile phone number",
+        "data": {
+          "mobile": "Mobile Number"
+        }
+      },
+      "sms": {
+        "title": "SMS Verification",
+        "description": "1. Click the link below to open the captcha image, read it and enter in the \"Captcha Code\" field\n2. Check \"Send SMS Code\" and submit, wait for the SMS\n3. Enter the SMS code to complete login\n\nCaptcha Image: {captcha_url}",
+        "data": {
+          "captcha_code": "Captcha Code",
+          "sms_code": "SMS Code",
+          "send_sms": "Send SMS Code"
+        }
+      },
+      "discover": {
+        "title": "Account Discovery",
+        "description": "Found {count} gas account(s)"
+      }
+    },
+    "error": {
+      "invalid_mobile": "Please enter a valid 11-digit mobile number",
+      "captcha_required": "Please enter the captcha code",
+      "sms_code_required": "Please enter the SMS code",
+      "sms_send_failed": "Failed to send SMS code. Please check if the captcha code is correct.",
+      "invalid_sms_code": "SMS code is incorrect or expired",
+      "invalid_token": "Authentication failed. Please login again.",
+      "connection_error": "Connection failed. Please check your network.",
+      "no_accounts": "No bound gas accounts found",
+      "api_error": "API call failed"
+    },
+    "abort": {
+      "already_configured": "This mobile number is already configured",
+      "reauth_successful": "Re-authentication successful"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ZR Gas Options",
+        "description": "Adjust data refresh and balance alert settings",
+        "data": {
+          "update_interval": "Refresh Interval (seconds)",
+          "balance_threshold": "Balance Alert Threshold (CNY)"
+        }
+      }
+    }
+  },
+  "reauth": {
+    "step": {
+      "reauth_sms": {
+        "title": "Re-authentication",
+        "description": "Token expired. Please verify again.\nMobile: {mobile}\n\nCaptcha Image: {captcha_url}",
+        "data": {
+          "captcha_code": "Captcha Code",
+          "sms_code": "SMS Code",
+          "send_sms": "Send SMS Code"
+        }
+      }
+    },
+    "error": {
+      "captcha_required": "Please enter the captcha code",
+      "sms_code_required": "Please enter the SMS code",
+      "sms_send_failed": "Failed to send SMS code",
+      "invalid_sms_code": "SMS code is incorrect or expired",
+      "connection_error": "Connection failed. Please check your network."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "balance": {
+        "name": "Balance"
+      },
+      "monthly_usage": {
+        "name": "Monthly Usage"
+      },
+      "monthly_cost": {
+        "name": "Monthly Cost"
+      }
+    }
+  }
+}
