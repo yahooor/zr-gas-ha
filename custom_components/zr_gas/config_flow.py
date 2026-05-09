@@ -2,8 +2,8 @@
 
 Provides a user-friendly SMS login flow:
   1. User enters mobile phone number
-  2. User enters captcha + SMS verification code
-  3. System logs in, discovers bound gas accounts, and creates entry
+  2. User opens captcha link, reads code, enters it → sends SMS
+  3. User enters SMS verification code → login → discover accounts
 
 Also includes:
   - OptionsFlow for adjusting refresh interval and balance threshold
@@ -50,11 +50,11 @@ class InvalidAuth(HomeAssistantError):
 class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for 中燃在线.
 
-    Flow: user (mobile) → sms (captcha + code) → discover → entry
+    Flow: user (mobile) → captcha (link + code + send) → sms_code (login) → discover → entry
     """
 
     VERSION = 1
-    MINOR_VERSION = 2
+    MINOR_VERSION = 3
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -65,7 +65,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step1: Enter mobile phone number.
+        """Step 1: Enter mobile phone number.
 
         Args:
             user_input: User-provided form data, or None to show the form.
@@ -85,7 +85,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._mobile = mobile
                 session = async_get_clientsession(self.hass)
                 self._api = ZrGasAPI(session)
-                return await self.async_step_sms()
+                return await self.async_step_captcha()
 
         return self.async_show_form(
             step_id="user",
@@ -93,19 +93,15 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_sms(
+    async def async_step_captcha(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step2: Enter captcha code and SMS verification code.
+        """Step 2: Open captcha link, enter captcha code, send SMS.
 
-        The captcha image URL is generated from the API and shown as a
-        clickable link in the form's description_placeholders. The user
-        clicks the link to open the captcha image in a new browser tab,
-        reads the code, and enters it back here.
-
-        This step handles two actions:
-        - "send_sms": Sends the SMS code (requires captcha_code)
-        - "login": Logs in with the SMS code
+        The captcha image URL is provided as a clickable link in the
+        description. The user clicks the link to open the image in a
+        new browser tab, reads the code, enters it, and submits to
+        trigger the SMS send.
 
         Args:
             user_input: User-provided form data, or None to show the form.
@@ -123,64 +119,83 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             captcha_code = user_input.get("captcha_code", "").strip()
-            sms_code = user_input.get("sms_code", "").strip()
-            send_sms = user_input.get("send_sms", False)
 
-            # Action: Send SMS code (takes priority when checkbox is ticked)
-            if send_sms:
-                if not captcha_code or len(captcha_code) < 4:
-                    errors["base"] = "captcha_required"
-                elif not self._api:
-                    errors["base"] = "connection_error"
-                else:
-                    try:
-                        await self._api.send_sms_code(self._mobile, captcha_code)
-                        description_placeholders["sms_sent"] = "true"
-                    except ZrGasSmsError as err:
-                        _LOGGER.warning("SMS send failed: %s", err)
-                        errors["base"] = "sms_send_failed"
-                    except Exception as err:
-                        _LOGGER.error("Unexpected error sending SMS: %s", err)
-                        errors["base"] = "connection_error"
-
-            # Action: Login with SMS code
-            elif sms_code:
-                if not self._api:
-                    errors["base"] = "connection_error"
-                else:
-                    try:
-                        result = await self._api.login_with_sms(
-                            self._mobile, sms_code
-                        )
-                        # Login successful — proceed to account discovery
-                        return await self.async_step_discover()
-                    except ZrGasAuthError as err:
-                        _LOGGER.warning("SMS login failed: %s", err)
-                        errors["base"] = "invalid_sms_code"
-                    except Exception as err:
-                        _LOGGER.error("Unexpected error during login: %s", err)
-                        errors["base"] = "connection_error"
+            if not captcha_code or len(captcha_code) < 4:
+                errors["base"] = "captcha_required"
+            elif not self._api:
+                errors["base"] = "connection_error"
             else:
-                # No action: neither send_sms nor sms_code provided
-                errors["base"] = "sms_code_required"
+                try:
+                    await self._api.send_sms_code(self._mobile, captcha_code)
+                    # SMS sent successfully — proceed to SMS code input
+                    return await self.async_step_sms_code()
+                except ZrGasSmsError as err:
+                    _LOGGER.warning("SMS send failed: %s", err)
+                    errors["base"] = "sms_send_failed"
+                    # Refresh captcha URL on failure
+                    captcha_url = self._api.get_captcha_url(self._mobile)
+                    description_placeholders["captcha_url"] = captcha_url
+                except Exception as err:
+                    _LOGGER.error("Unexpected error sending SMS: %s", err)
+                    errors["base"] = "connection_error"
 
         return self.async_show_form(
-            step_id="sms",
+            step_id="captcha",
             data_schema=vol.Schema(
                 {
                     vol.Required("captcha_code"): str,
-                    vol.Required("sms_code"): str,
-                    vol.Optional("send_sms", default=False): bool,
                 }
             ),
             errors=errors,
             description_placeholders=description_placeholders,
         )
 
+    async def async_step_sms_code(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 3: Enter SMS verification code to login.
+
+        Args:
+            user_input: User-provided form data, or None to show the form.
+
+        Returns:
+            FlowResult for the next step or form with errors.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            sms_code = user_input.get("sms_code", "").strip()
+
+            if not sms_code:
+                errors["base"] = "sms_code_required"
+            elif not self._api:
+                errors["base"] = "connection_error"
+            else:
+                try:
+                    await self._api.login_with_sms(self._mobile, sms_code)
+                    # Login successful — proceed to account discovery
+                    return await self.async_step_discover()
+                except ZrGasAuthError as err:
+                    _LOGGER.warning("SMS login failed: %s", err)
+                    errors["base"] = "invalid_sms_code"
+                except Exception as err:
+                    _LOGGER.error("Unexpected error during login: %s", err)
+                    errors["base"] = "connection_error"
+
+        return self.async_show_form(
+            step_id="sms_code",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("sms_code"): str,
+                }
+            ),
+            errors=errors,
+        )
+
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step3: Discover bound gas accounts and create entry.
+        """Step 4: Discover bound gas accounts and create entry.
 
         Args:
             user_input: Not used (auto-proceeds).
@@ -263,35 +278,34 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Handle reauthorization when the token expires.
 
-        Re-uses the SMS login flow — user enters mobile + SMS code again.
+        Re-uses the SMS login flow — user enters captcha + SMS code again.
 
         Args:
             entry_data: Data from the existing config entry.
 
         Returns:
-            FlowResult for the reauth mobile input form.
+            FlowResult for the reauth captcha input form.
         """
         # Pre-fill mobile from existing entry
         self._mobile = entry_data.get(CONF_MOBILE, "")
         session = async_get_clientsession(self.hass)
         self._api = ZrGasAPI(session)
-        return await self.async_step_reauth_sms()
+        return await self.async_step_reauth_captcha()
 
-    async def async_step_reauth_sms(
+    async def async_step_reauth_captcha(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Reauth step: enter captcha + SMS code to get a new token.
+        """Reauth step 1: Open captcha link, enter code, send SMS.
 
         Args:
             user_input: User-provided form data, or None to show the form.
 
         Returns:
-            FlowResult to update the existing entry or show errors.
+            FlowResult to proceed to SMS code step or show errors.
         """
         errors: dict[str, str] = {}
         description_placeholders: dict[str, str] = {}
 
-        # Generate captcha URL for the clickable link
         if self._api:
             captcha_url = self._api.get_captcha_url(self._mobile)
             description_placeholders["captcha_url"] = captcha_url
@@ -305,70 +319,92 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             captcha_code = user_input.get("captcha_code", "").strip()
-            sms_code = user_input.get("sms_code", "").strip()
-            send_sms = user_input.get("send_sms", False)
 
-            # Send SMS
-            if send_sms:
-                if not captcha_code or len(captcha_code) < 4:
-                    errors["base"] = "captcha_required"
-                elif not self._api:
-                    errors["base"] = "connection_error"
-                else:
-                    try:
-                        await self._api.send_sms_code(self._mobile, captcha_code)
-                        description_placeholders["sms_sent"] = "true"
-                    except ZrGasSmsError as err:
-                        _LOGGER.warning("SMS send failed: %s", err)
-                        errors["base"] = "sms_send_failed"
-                    except Exception as err:
-                        _LOGGER.error("Unexpected error sending SMS: %s", err)
-                        errors["base"] = "connection_error"
-
-            # Login
-            elif sms_code:
-                if not self._api:
-                    errors["base"] = "connection_error"
-                else:
-                    try:
-                        await self._api.login_with_sms(self._mobile, sms_code)
-
-                        # Update the existing entry with new credentials
-                        entry = self.hass.config_entries.async_get_entry(
-                            self.context["entry_id"]
-                        )
-                        if entry:
-                            self.hass.config_entries.async_update_entry(
-                                entry,
-                                data={
-                                    **entry.data,
-                                    CONF_ACCESS_TOKEN: self._api.access_token,
-                                    CONF_USER_ID: self._api.user_id,
-                                    CONF_X_MAS_APP_INFO: self._api.x_mas_app_info,
-                                },
-                            )
-                        return self.async_abort(reason="reauth_successful")
-
-                    except ZrGasAuthError as err:
-                        _LOGGER.warning("Reauth login failed: %s", err)
-                        errors["base"] = "invalid_sms_code"
-                    except Exception as err:
-                        _LOGGER.error("Unexpected error during reauth: %s", err)
-                        errors["base"] = "connection_error"
+            if not captcha_code or len(captcha_code) < 4:
+                errors["base"] = "captcha_required"
+            elif not self._api:
+                errors["base"] = "connection_error"
             else:
-                errors["base"] = "sms_code_required"
+                try:
+                    await self._api.send_sms_code(self._mobile, captcha_code)
+                    # SMS sent — proceed to SMS code input
+                    return await self.async_step_reauth_sms_code()
+                except ZrGasSmsError as err:
+                    _LOGGER.warning("SMS send failed: %s", err)
+                    errors["base"] = "sms_send_failed"
+                    # Refresh captcha URL on failure
+                    captcha_url = self._api.get_captcha_url(self._mobile)
+                    description_placeholders["captcha_url"] = captcha_url
+                except Exception as err:
+                    _LOGGER.error("Unexpected error sending SMS: %s", err)
+                    errors["base"] = "connection_error"
 
         return self.async_show_form(
-            step_id="reauth_sms",
+            step_id="reauth_captcha",
             data_schema=vol.Schema(
                 {
                     vol.Required("captcha_code"): str,
-                    vol.Required("sms_code"): str,
-                    vol.Optional("send_sms", default=False): bool,
                 }
             ),
             errors=errors,
             description_placeholders=description_placeholders,
+        )
+
+    async def async_step_reauth_sms_code(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Reauth step 2: Enter SMS verification code to get a new token.
+
+        Args:
+            user_input: User-provided form data, or None to show the form.
+
+        Returns:
+            FlowResult to update the existing entry or show errors.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            sms_code = user_input.get("sms_code", "").strip()
+
+            if not sms_code:
+                errors["base"] = "sms_code_required"
+            elif not self._api:
+                errors["base"] = "connection_error"
+            else:
+                try:
+                    await self._api.login_with_sms(self._mobile, sms_code)
+
+                    # Update the existing entry with new credentials
+                    entry = self.hass.config_entries.async_get_entry(
+                        self.context["entry_id"]
+                    )
+                    if entry:
+                        self.hass.config_entries.async_update_entry(
+                            entry,
+                            data={
+                                **entry.data,
+                                CONF_ACCESS_TOKEN: self._api.access_token,
+                                CONF_USER_ID: self._api.user_id,
+                                CONF_X_MAS_APP_INFO: self._api.x_mas_app_info,
+                            },
+                        )
+                    return self.async_abort(reason="reauth_successful")
+
+                except ZrGasAuthError as err:
+                    _LOGGER.warning("Reauth login failed: %s", err)
+                    errors["base"] = "invalid_sms_code"
+                except Exception as err:
+                    _LOGGER.error("Unexpected error during reauth: %s", err)
+                    errors["base"] = "connection_error"
+
+        return self.async_show_form(
+            step_id="reauth_sms_code",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("sms_code"): str,
+                }
+            ),
+            errors=errors,
         )
 
     # ── Options Flow ─────────────────────────────────────────────────
