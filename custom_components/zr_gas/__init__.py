@@ -252,11 +252,18 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
 
             bill_list: list[ZrGasBill] = bills if isinstance(bills, list) else []
             if bill_list:
-                latest_bill = bill_list[-1]
-                monthly_usage = latest_bill.usage_volume
-                monthly_cost = latest_bill.usage_amount
-                period = latest_bill.period
-                unit_price = latest_bill.unit_price
+                # Try to find the bill matching the current period first
+                current_bill = None
+                for bill in bill_list:
+                    if bill.period == current_period:
+                        current_bill = bill
+                        break
+                # Fallback to the last bill if no exact period match
+                matched_bill = current_bill or bill_list[-1]
+                monthly_usage = matched_bill.usage_volume
+                monthly_cost = matched_bill.usage_amount
+                period = matched_bill.period
+                unit_price = matched_bill.unit_price
 
             return ZrGasDeviceData(
                 balance=detail.balance,
@@ -297,3 +304,15 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             raise UpdateFailed(
                 f"Unexpected error for {self.cust_name}: {err}"
             ) from err
+        else:
+            # Data fetched successfully — clear any previous token-expired issue
+            ir.async_delete_issue(
+                self.hass, DOMAIN, f"token_expired_{self.cust_code}"
+            )
+            _LOGGER.debug(
+                "Data updated for %s: balance=%.2f, usage=%.2f, cost=%.2f",
+                self.cust_name,
+                detail.balance,
+                monthly_usage,
+                monthly_cost,
+            )

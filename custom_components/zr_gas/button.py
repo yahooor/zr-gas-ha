@@ -41,14 +41,12 @@ class ZrGasRefreshButton(CoordinatorEntity[ZrGasDataUpdateCoordinator], ButtonEn
         self,
         coordinator: ZrGasDataUpdateCoordinator,
         cust_code: str,
-        cust_code_short: str,
     ) -> None:
         """Initialize the refresh button.
 
         Args:
             coordinator: Data update coordinator for this customer.
             cust_code: Full customer code.
-            cust_code_short: Last 4 digits for display.
         """
         super().__init__(coordinator)
         self._cust_code = cust_code
@@ -88,13 +86,11 @@ async def async_setup_entry(
     entities: list[ButtonEntity] = []
 
     for cust_code, coordinator in coordinators.items():
-        cust_code_short = cust_code[-4:] if len(cust_code) >= 4 else cust_code
         entities.append(
             ZrGasRefreshButton(
                 coordinator=coordinator,
                 cust_code=cust_code,
-                cust_code_short=cust_code_short,
             )
         )
 
-    async_add_entities(entities, True)
+    async_add_entities(entities, update_before_add=True)

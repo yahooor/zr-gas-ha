@@ -20,7 +20,6 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import ZrGasAPI, ZrGasApiError, ZrGasAuthError, ZrGasSmsError
@@ -37,14 +36,6 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class CannotConnect(HomeAssistantError):
-    """Error to indicate we cannot connect."""
-
-
-class InvalidAuth(HomeAssistantError):
-    """Error to indicate there is invalid auth."""
 
 
 class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -387,8 +378,11 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await self._api.login_with_sms(self._mobile, sms_code)
 
                     # Update the existing entry with new credentials
-                    entry = self.hass.config_entries.async_get_entry(
-                        self.context["entry_id"]
+                    entry_id = self.context.get("entry_id")
+                    entry = (
+                        self.hass.config_entries.async_get_entry(entry_id)
+                        if entry_id
+                        else None
                     )
                     if entry:
                         self.hass.config_entries.async_update_entry(

@@ -68,7 +68,7 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         key="monthly_usage",
         translation_key="monthly_usage",
         device_class=SensorDeviceClass.GAS,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
         icon="mdi:fire",
         suggested_display_precision=2,
@@ -187,4 +187,4 @@ async def async_setup_entry(
                 )
             )
 
-    async_add_entities(entities, True)
+    async_add_entities(entities, update_before_add=True)
