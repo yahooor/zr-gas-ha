@@ -1,0 +1,11 @@
+{
+  "domain": "zr_gas",
+  "name": "中燃在线",
+  "codeowners": ["yahooor"],
+  "config_flow": true,
+  "documentation": "https://github.com/yahooor/zr-gas-ha",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/yahooor/zr-gas-ha/issues",
+  "requirements": [],
+  "version": "0.5.2"
+}
