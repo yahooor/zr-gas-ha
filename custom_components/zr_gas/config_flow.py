@@ -45,7 +45,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """
 
     VERSION = 1
-    MINOR_VERSION = 3
+    MINOR_VERSION = 4
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -56,7 +56,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1: Enter mobile phone number.
+        """Step 1: Choose authentication method.
 
         Args:
             user_input: User-provided form data, or None to show the form.
@@ -67,7 +67,11 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            mobile = user_input[CONF_MOBILE].strip()
+            auth_method = user_input.get("auth_method", "sms")
+            if auth_method == "token":
+                return await self.async_step_token()
+
+            mobile = user_input.get(CONF_MOBILE, "").strip()
 
             # Basic validation: must be 11 digits
             if not mobile.isdigit() or len(mobile) != 11:
@@ -80,7 +84,73 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_MOBILE): str}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("auth_method", default="sms"): vol.In(
+                        {"sms": "sms", "token": "token"}
+                    ),
+                    vol.Optional(CONF_MOBILE): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 1b: Import pre-obtained token directly.
+
+        Allows users to skip SMS verification by pasting a token
+        obtained from another source (e.g., API call or packet capture).
+
+        Args:
+            user_input: User-provided form data, or None to show the form.
+
+        Returns:
+            FlowResult to proceed to discovery or show errors.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            access_token = user_input.get(CONF_ACCESS_TOKEN, "").strip()
+            user_id = user_input.get(CONF_USER_ID, "").strip()
+            x_mas_app_info = user_input.get(CONF_X_MAS_APP_INFO, "").strip()
+            mobile = user_input.get(CONF_MOBILE, "").strip()
+
+            if not access_token or not user_id:
+                errors["base"] = "token_required"
+            else:
+                session = async_get_clientsession(self.hass)
+                self._api = ZrGasAPI(
+                    session,
+                    access_token=access_token,
+                    user_id=user_id,
+                    x_mas_app_info=x_mas_app_info,
+                )
+                self._mobile = mobile
+
+                # Validate token by trying to get customer list
+                try:
+                    await self._api.init_request(self._api.user_id)
+                    # Token is valid, proceed to discovery
+                    return await self.async_step_discover()
+                except ZrGasAuthError as err:
+                    _LOGGER.warning("Token validation failed: %s", err)
+                    errors["base"] = "invalid_token"
+                except Exception as err:
+                    _LOGGER.error("Token import error: %s", err)
+                    errors["base"] = "connection_error"
+
+        return self.async_show_form(
+            step_id="token",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ACCESS_TOKEN): str,
+                    vol.Required(CONF_USER_ID): str,
+                    vol.Optional(CONF_X_MAS_APP_INFO): str,
+                    vol.Optional(CONF_MOBILE): str,
+                }
+            ),
             errors=errors,
         )
 
