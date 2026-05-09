@@ -1,0 +1,96 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "中燃在线登录",
+        "description": "输入注册时使用的手机号码",
+        "data": {
+          "mobile": "手机号码"
+        }
+      },
+      "captcha": {
+        "title": "图形验证码",
+        "description": "1. 点击下方链接，在新标签页打开验证码图片\n2. 识别验证码后填入下方输入框\n3. 点击提交，系统将发送短信验证码\n\n[点击查看验证码图片]({captcha_url})",
+        "data": {
+          "captcha_code": "图形验证码"
+        }
+      },
+      "sms_code": {
+        "title": "短信验证码",
+        "description": "短信验证码已发送到您的手机，请输入收到的验证码完成登录",
+        "data": {
+          "sms_code": "短信验证码"
+        }
+      },
+      "discover": {
+        "title": "账户发现",
+        "description": "已发现 {count} 个燃气账户"
+      }
+    },
+    "error": {
+      "invalid_mobile": "请输入正确的11位手机号码",
+      "captcha_required": "请输入图形验证码",
+      "sms_code_required": "请输入短信验证码",
+      "sms_send_failed": "验证码发送失败，请检查图形验证码是否正确",
+      "invalid_sms_code": "短信验证码错误或已过期",
+      "invalid_token": "认证失败，请重新登录",
+      "connection_error": "连接失败，请检查网络",
+      "no_accounts": "未发现绑定的燃气账户",
+      "api_error": "API 调用失败"
+    },
+    "abort": {
+      "already_configured": "该手机号已经配置过",
+      "reauth_successful": "重新认证成功"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "中燃在线选项",
+        "description": "调整数据刷新和余额预警设置",
+        "data": {
+          "update_interval": "刷新间隔（秒）",
+          "balance_threshold": "余额预警阈值（元）"
+        }
+      }
+    }
+  },
+  "reauth": {
+    "step": {
+      "reauth_captcha": {
+        "title": "重新认证 - 图形验证码",
+        "description": "中燃在线 Token 已过期，请重新验证\n手机号: {mobile}\n\n1. 点击下方链接打开验证码图片\n2. 识别后填入输入框并提交\n\n[点击查看验证码图片]({captcha_url})",
+        "data": {
+          "captcha_code": "图形验证码"
+        }
+      },
+      "reauth_sms_code": {
+        "title": "重新认证 - 短信验证码",
+        "description": "短信验证码已发送到 {mobile}，请输入收到的验证码",
+        "data": {
+          "sms_code": "短信验证码"
+        }
+      }
+    },
+    "error": {
+      "captcha_required": "请输入图形验证码",
+      "sms_code_required": "请输入短信验证码",
+      "sms_send_failed": "验证码发送失败",
+      "invalid_sms_code": "短信验证码错误或已过期",
+      "connection_error": "连接失败，请检查网络"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "balance": {
+        "name": "余额"
+      },
+      "monthly_usage": {
+        "name": "月用量"
+      },
+      "monthly_cost": {
+        "name": "月费用"
+      }
+    }
+  }
+}
