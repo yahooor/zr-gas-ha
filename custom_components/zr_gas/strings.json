@@ -2,10 +2,19 @@
   "config": {
     "step": {
       "user": {
-        "title": "中燃在线配置",
-        "description": "输入从微信小程序抓包获取的 accessToken",
+        "title": "中燃在线登录",
+        "description": "输入在中国燃气注册的手机号码",
         "data": {
-          "access_token": "Access Token"
+          "mobile": "手机号码"
+        }
+      },
+      "sms": {
+        "title": "验证码登录",
+        "description": "1. 先输入图形验证码，点击「发送验证码」\n2. 收到短信后输入验证码完成登录\n\n图形验证码: ![验证码]({captcha_url})",
+        "data": {
+          "captcha_code": "图形验证码",
+          "sms_code": "短信验证码",
+          "send_sms": "发送验证码"
         }
       },
       "discover": {
@@ -14,13 +23,18 @@
       }
     },
     "error": {
-      "invalid_token": "Token 无效或已过期",
+      "invalid_mobile": "请输入正确的11位手机号码",
+      "captcha_required": "请输入图形验证码",
+      "sms_code_required": "请输入短信验证码",
+      "sms_send_failed": "验证码发送失败，请检查图形验证码是否正确",
+      "invalid_sms_code": "短信验证码错误或已过期",
+      "invalid_token": "认证失败，请重新登录",
       "connection_error": "连接失败，请检查网络",
       "no_accounts": "未发现绑定的燃气账户",
       "api_error": "API 调用失败"
     },
     "abort": {
-      "already_configured": "该账户已经配置过",
+      "already_configured": "该手机号已经配置过",
       "reauth_successful": "重新认证成功"
     }
   },
@@ -38,16 +52,21 @@
   },
   "reauth": {
     "step": {
-      "reauth_confirm": {
+      "reauth_sms": {
         "title": "重新认证",
-        "description": "中燃在线 Token 已过期，请输入新的 accessToken",
+        "description": "中燃在线 Token 已过期，请重新验证\n手机号: {mobile}\n\n图形验证码: ![验证码]({captcha_url})",
         "data": {
-          "access_token": "新的 Access Token"
+          "captcha_code": "图形验证码",
+          "sms_code": "短信验证码",
+          "send_sms": "发送验证码"
         }
       }
     },
     "error": {
-      "invalid_token": "Token 无效或已过期",
+      "captcha_required": "请输入图形验证码",
+      "sms_code_required": "请输入短信验证码",
+      "sms_send_failed": "验证码发送失败",
+      "invalid_sms_code": "短信验证码错误或已过期",
       "connection_error": "连接失败，请检查网络"
     }
   }

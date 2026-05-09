@@ -1,13 +1,13 @@
 """Config flow for the 中燃在线 (ZR Gas) integration.
 
-Provides a 3-step configuration flow:
-  1. User enters accessToken
-  2. System validates token and discovers bound gas accounts
-  3. Entry is created for the account(s)
+Provides a user-friendly SMS login flow:
+  1. User enters mobile phone number
+  2. User enters captcha + SMS verification code
+  3. System logs in, discovers bound gas accounts, and creates entry
 
 Also includes:
   - OptionsFlow for adjusting refresh interval and balance threshold
-  - ReauthFlow for token renewal when the existing token expires
+  - ReauthFlow that re-uses the SMS login when the token expires
 """
 
 from __future__ import annotations
@@ -18,17 +18,19 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_ACCESS_TOKEN
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import ZrGasAPI, ZrGasApiError, ZrGasAuthError
+from .api import ZrGasAPI, ZrGasApiError, ZrGasAuthError, ZrGasSmsError
 from .const import (
+    CONF_ACCESS_TOKEN,
     CONF_BALANCE_THRESHOLD,
+    CONF_MOBILE,
     CONF_UPDATE_INTERVAL,
     CONF_USER_ID,
+    CONF_X_MAS_APP_INFO,
     DEFAULT_BALANCE_THRESHOLD,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
@@ -46,21 +48,24 @@ class InvalidAuth(HomeAssistantError):
 
 
 class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for 中燃在线."""
+    """Handle a config flow for 中燃在线.
+
+    Flow: user (mobile) → sms (captcha + code) → discover → entry
+    """
 
     VERSION = 1
-    MINOR_VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""
-        self._access_token: str = ""
-        self._user_id: str = ""
+        self._mobile: str = ""
+        self._api: ZrGasAPI | None = None
         self._discovered_customers: list[dict[str, str]] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step: user provides accessToken.
+        """Step 1: Enter mobile phone number.
 
         Args:
             user_input: User-provided form data, or None to show the form.
@@ -71,71 +76,144 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            self._access_token = user_input[CONF_ACCESS_TOKEN]
+            mobile = user_input[CONF_MOBILE].strip()
 
-            try:
-                info = await self._validate_token(self._access_token)
-            except CannotConnect:
-                errors["base"] = "connection_error"
-            except InvalidAuth:
-                errors["base"] = "invalid_token"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "api_error"
+            # Basic validation: must be 11 digits
+            if not mobile.isdigit() or len(mobile) != 11:
+                errors["base"] = "invalid_mobile"
             else:
-                # Store userId for account discovery
-                # 需实际验证: userId 字段名
-                self._user_id = (
-                    info.get("userId")
-                    or info.get("user_id")
-                    or info.get("data", {}).get("userId")
-                    or ""
-                )
-                return await self.async_step_discover()
+                self._mobile = mobile
+                session = async_get_clientsession(self.hass)
+                self._api = ZrGasAPI(session)
+                return await self.async_step_sms()
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({vol.Required(CONF_ACCESS_TOKEN): str}),
+            data_schema=vol.Schema({vol.Required(CONF_MOBILE): str}),
             errors=errors,
+        )
+
+    async def async_step_sms(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2: Enter captcha code and SMS verification code.
+
+        The captcha image URL is generated from the API and shown in the
+        form's description_placeholders. User reads the captcha, enters
+        it, then requests an SMS code. After receiving the SMS, they
+        enter the code to proceed.
+
+        This step handles two actions:
+        - "send_sms": Sends the SMS code (requires captcha_code)
+        - "login": Logs in with the SMS code
+
+        Args:
+            user_input: User-provided form data, or None to show the form.
+
+        Returns:
+            FlowResult for the next step or form with errors.
+        """
+        errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+
+        # Generate captcha URL for display
+        if self._api:
+            captcha_url = self._api.get_captcha_url(self._mobile)
+            description_placeholders["captcha_url"] = captcha_url
+
+        if user_input is not None:
+            captcha_code = user_input.get("captcha_code", "").strip()
+            sms_code = user_input.get("sms_code", "").strip()
+            send_sms = user_input.get("send_sms", False)
+
+            # Action: Send SMS code (takes priority when checkbox is ticked)
+            if send_sms:
+                if not captcha_code or len(captcha_code) < 4:
+                    errors["base"] = "captcha_required"
+                elif not self._api:
+                    errors["base"] = "connection_error"
+                else:
+                    try:
+                        await self._api.send_sms_code(self._mobile, captcha_code)
+                        description_placeholders["sms_sent"] = "true"
+                    except ZrGasSmsError as err:
+                        _LOGGER.warning("SMS send failed: %s", err)
+                        errors["base"] = "sms_send_failed"
+                    except Exception as err:
+                        _LOGGER.error("Unexpected error sending SMS: %s", err)
+                        errors["base"] = "connection_error"
+
+            # Action: Login with SMS code
+            elif sms_code:
+                if not self._api:
+                    errors["base"] = "connection_error"
+                else:
+                    try:
+                        result = await self._api.login_with_sms(
+                            self._mobile, sms_code
+                        )
+                        # Login successful — proceed to account discovery
+                        return await self.async_step_discover()
+                    except ZrGasAuthError as err:
+                        _LOGGER.warning("SMS login failed: %s", err)
+                        errors["base"] = "invalid_sms_code"
+                    except Exception as err:
+                        _LOGGER.error("Unexpected error during login: %s", err)
+                        errors["base"] = "connection_error"
+            else:
+                # No action: neither send_sms nor sms_code provided
+                errors["base"] = "sms_code_required"
+
+        return self.async_show_form(
+            step_id="sms",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("captcha_code"): str,
+                    vol.Required("sms_code"): str,
+                    vol.Optional("send_sms", default=False): bool,
+                }
+            ),
+            errors=errors,
+            description_placeholders=description_placeholders,
         )
 
     async def async_step_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the discovery step: find bound gas customer accounts.
-
-        Validates the token, then queries the API for bound gas accounts.
-        If accounts are found, creates a config entry.
+        """Step 3: Discover bound gas accounts and create entry.
 
         Args:
-            user_input: Not used in this step (auto-proceeds).
+            user_input: Not used (auto-proceeds).
 
         Returns:
             FlowResult creating the entry or showing an error.
         """
         errors: dict[str, str] = {}
 
-        try:
-            customers = await self._discover_accounts(
-                self._access_token, self._user_id
-            )
-        except CannotConnect:
+        if not self._api:
             errors["base"] = "connection_error"
             return self.async_show_form(
                 step_id="discover",
                 errors=errors,
                 description_placeholders={"count": "0"},
             )
-        except InvalidAuth:
+
+        try:
+            await self._api.init_request(self._api.user_id)
+            customers = await self._api.get_bind_gas_cust_list(
+                self._api.user_id
+            )
+        except ZrGasAuthError as err:
+            _LOGGER.error("Auth error during discovery: %s", err)
             errors["base"] = "invalid_token"
             return self.async_show_form(
                 step_id="discover",
                 errors=errors,
                 description_placeholders={"count": "0"},
             )
-        except Exception:  # pylint: disable=broad-except
-            _LOGGER.exception("Unexpected exception during discovery")
-            errors["base"] = "api_error"
+        except Exception as err:
+            _LOGGER.error("API error during discovery: %s", err)
+            errors["base"] = "connection_error"
             return self.async_show_form(
                 step_id="discover",
                 errors=errors,
@@ -150,25 +228,26 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 description_placeholders={"count": "0"},
             )
 
-        # Store discovered customers for potential future multi-account support
+        # Store discovered customers
         self._discovered_customers = [
             {"cust_code": c.cust_code, "cust_name": c.cust_name}
             for c in customers
         ]
 
-        # Use first customer as the primary account name
-        # 需实际验证: 如果有多个账户，可能需要循环创建多个 entry
         primary_name = customers[0].cust_name or "中燃在线"
+        user_id = self._api.user_id or self._mobile
 
-        # Check if already configured
-        await self.async_set_unique_id(self._user_id)
+        # Deduplicate by user_id (mobile number)
+        await self.async_set_unique_id(user_id)
         self._abort_if_already_configured()
 
         return self.async_create_entry(
             title=primary_name,
             data={
-                CONF_ACCESS_TOKEN: self._access_token,
-                CONF_USER_ID: self._user_id,
+                CONF_ACCESS_TOKEN: self._api.access_token,
+                CONF_USER_ID: self._api.user_id,
+                CONF_X_MAS_APP_INFO: self._api.x_mas_app_info,
+                CONF_MOBILE: self._mobile,
                 "customers": self._discovered_customers,
             },
             options={
@@ -177,74 +256,119 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    # ── Reauth Flow ─────────────────────────────────────────────────
+
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
     ) -> FlowResult:
         """Handle reauthorization when the token expires.
 
-        Triggered by ConfigEntryAuthFailed raised in the coordinator.
+        Re-uses the SMS login flow — user enters mobile + SMS code again.
 
         Args:
             entry_data: Data from the existing config entry.
 
         Returns:
-            FlowResult for the reauth confirmation form.
+            FlowResult for the reauth mobile input form.
         """
-        return await self.async_step_reauth_confirm()
+        # Pre-fill mobile from existing entry
+        self._mobile = entry_data.get(CONF_MOBILE, "")
+        session = async_get_clientsession(self.hass)
+        self._api = ZrGasAPI(session)
+        return await self.async_step_reauth_sms()
 
-    async def async_step_reauth_confirm(
+    async def async_step_reauth_sms(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle reauthorization confirmation: enter new accessToken.
+        """Reauth step: enter captcha + SMS code to get a new token.
 
         Args:
-            user_input: User-provided form data with new token.
+            user_input: User-provided form data, or None to show the form.
 
         Returns:
             FlowResult to update the existing entry or show errors.
         """
         errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
+
+        if self._api:
+            captcha_url = self._api.get_captcha_url(self._mobile)
+            description_placeholders["captcha_url"] = captcha_url
+            description_placeholders["mobile"] = (
+                f"{self._mobile[:3]}****{self._mobile[-4:]}"
+                if len(self._mobile) == 11
+                else self._mobile
+            )
 
         if user_input is not None:
-            new_token = user_input[CONF_ACCESS_TOKEN]
+            captcha_code = user_input.get("captcha_code", "").strip()
+            sms_code = user_input.get("sms_code", "").strip()
+            send_sms = user_input.get("send_sms", False)
 
-            try:
-                info = await self._validate_token(new_token)
-            except CannotConnect:
-                errors["base"] = "connection_error"
-            except InvalidAuth:
-                errors["base"] = "invalid_token"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception during reauth")
-                errors["base"] = "api_error"
+            # Send SMS
+            if send_sms:
+                if not captcha_code or len(captcha_code) < 4:
+                    errors["base"] = "captcha_required"
+                elif not self._api:
+                    errors["base"] = "connection_error"
+                else:
+                    try:
+                        await self._api.send_sms_code(self._mobile, captcha_code)
+                        description_placeholders["sms_sent"] = "true"
+                    except ZrGasSmsError as err:
+                        _LOGGER.warning("SMS send failed: %s", err)
+                        errors["base"] = "sms_send_failed"
+                    except Exception as err:
+                        _LOGGER.error("Unexpected error sending SMS: %s", err)
+                        errors["base"] = "connection_error"
+
+            # Login
+            elif sms_code:
+                if not self._api:
+                    errors["base"] = "connection_error"
+                else:
+                    try:
+                        await self._api.login_with_sms(self._mobile, sms_code)
+
+                        # Update the existing entry with new credentials
+                        entry = self.hass.config_entries.async_get_entry(
+                            self.context["entry_id"]
+                        )
+                        if entry:
+                            self.hass.config_entries.async_update_entry(
+                                entry,
+                                data={
+                                    **entry.data,
+                                    CONF_ACCESS_TOKEN: self._api.access_token,
+                                    CONF_USER_ID: self._api.user_id,
+                                    CONF_X_MAS_APP_INFO: self._api.x_mas_app_info,
+                                },
+                            )
+                        return self.async_abort(reason="reauth_successful")
+
+                    except ZrGasAuthError as err:
+                        _LOGGER.warning("Reauth login failed: %s", err)
+                        errors["base"] = "invalid_sms_code"
+                    except Exception as err:
+                        _LOGGER.error("Unexpected error during reauth: %s", err)
+                        errors["base"] = "connection_error"
             else:
-                new_user_id = (
-                    info.get("userId")
-                    or info.get("user_id")
-                    or info.get("data", {}).get("userId")
-                    or ""
-                )
-
-                # Update the existing entry with new token
-                entry = self.hass.config_entries.async_get_entry(
-                    self.context["entry_id"]
-                )
-                if entry:
-                    self.hass.config_entries.async_update_entry(
-                        entry,
-                        data={
-                            **entry.data,
-                            CONF_ACCESS_TOKEN: new_token,
-                            CONF_USER_ID: new_user_id,
-                        },
-                    )
-                return self.async_abort(reason="reauth_successful")
+                errors["base"] = "sms_code_required"
 
         return self.async_show_form(
-            step_id="reauth_confirm",
-            data_schema=vol.Schema({vol.Required(CONF_ACCESS_TOKEN): str}),
+            step_id="reauth_sms",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("captcha_code"): str,
+                    vol.Required("sms_code"): str,
+                    vol.Optional("send_sms", default=False): bool,
+                }
+            ),
             errors=errors,
+            description_placeholders=description_placeholders,
         )
+
+    # ── Options Flow ─────────────────────────────────────────────────
 
     @staticmethod
     @callback
@@ -253,59 +377,6 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ZrGasOptionsFlow:
         """Get the options flow for this handler."""
         return ZrGasOptionsFlow(config_entry)
-
-    async def _validate_token(self, access_token: str) -> dict[str, Any]:
-        """Validate the access token against the API.
-
-        Args:
-            access_token: Token to validate.
-
-        Returns:
-            API response dict with user info.
-
-        Raises:
-            InvalidAuth: If token is invalid or expired.
-            CannotConnect: If the API cannot be reached.
-        """
-        session = async_get_clientsession(self.hass)
-        api = ZrGasAPI(session, access_token)
-        try:
-            # Init request is required before token check
-            await api.init_request("")
-            result = await api.check_token()
-        except ZrGasAuthError as err:
-            raise InvalidAuth from err
-        except Exception as err:
-            raise CannotConnect from err
-        return result
-
-    async def _discover_accounts(
-        self, access_token: str, user_id: str
-    ) -> list:
-        """Discover bound gas customer accounts.
-
-        Args:
-            access_token: Valid access token.
-            user_id: User ID from token validation.
-
-        Returns:
-            List of ZrGasCustomer instances.
-
-        Raises:
-            InvalidAuth: If authentication fails.
-            CannotConnect: If the API cannot be reached.
-        """
-        session = async_get_clientsession(self.hass)
-        api = ZrGasAPI(session, access_token, user_id=user_id)
-        try:
-            await api.init_request(user_id)
-            customers = await api.get_bind_gas_cust_list(user_id)
-        except ZrGasAuthError as err:
-            raise InvalidAuth from err
-        except Exception as err:
-            _LOGGER.error("API error during discovery: %s", err)
-            raise CannotConnect from err
-        return customers
 
 
 class ZrGasOptionsFlow(config_entries.OptionsFlow):

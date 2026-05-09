@@ -10,11 +10,12 @@ Key findings from reverse-engineering the web app JS (index.fd387e5a.js):
 - Content-Type: application/x-www-form-urlencoded (NOT JSON)
 - Response format: {"data": {...}, "message": "...", "status": 1}
 
-API response fields confirmed from user packet capture:
-- findCustInfoByCustCodeAndCustName returns:
-  countMoney (余额), custCode, custName, address, newCountMoney,
-  oweMoney, newOweMoney, awardMoney, newAwardMoney, agentMoney,
-  newAgentMoney, custType, custStatus, compName, etc.
+Login flow (from pages-login-login.js):
+1. GET captcha image: /controller/merchant/authCode.do?flag={mobile}&tn={timestamp}
+2. POST send SMS: /user/sendsms3.do  body: {codeKey, codeKeyValue, mobile}
+3. POST SMS login: /user/xcxMobileUserLogin  body: {mobile, code, channelType:6}
+   → returns {masToken, sid, data: {id, mobile, ...}}
+   → sid needs prefix: "aaahg10001/" + sid → x-mas-app-info header
 """
 
 from __future__ import annotations
@@ -28,12 +29,16 @@ import aiohttp
 
 from .const import (
     BASE_URL,
+    ENDPOINT_CAPTCHA_IMG,
     ENDPOINT_CHECK_TOKEN,
     ENDPOINT_GET_BILLS,
     ENDPOINT_GET_CUSTOMER_INFO,
     ENDPOINT_GET_CUSTOMERS,
     ENDPOINT_INIT,
+    ENDPOINT_LOGIN_SMS,
+    ENDPOINT_SEND_SMS,
     SIGN_SALT,
+    X_MAS_SID_PREFIX,
 )
 from .models import ZrGasBill, ZrGasCustomer, ZrGasCustomerDetail
 
@@ -48,36 +53,226 @@ class ZrGasAuthError(ZrGasApiError):
     """Authentication error — token invalid or expired."""
 
 
+class ZrGasSmsError(ZrGasApiError):
+    """Error during SMS verification code flow."""
+
+
 class ZrGasAPI:
     """Async API client for 中燃在线 (ZR Gas) cloud services.
 
-    Communicates with the ZR Gas API using form-encoded POST requests
-    with MD5-based request signing.
+    Supports two authentication modes:
+    1. **SMS login** (user-friendly): mobile + captcha + SMS code → masToken
+    2. **Direct token** (advanced): use a pre-obtained accessToken directly
 
     Usage::
 
-        async with aiohttp.ClientSession() as session:
-            api = ZrGasAPI(session, access_token="...")
-            user_info = await api.check_token()
+        session = async_get_clientsession(hass)
+
+        # SMS login flow
+        api = ZrGasAPI(session)
+        await api.send_sms_code(mobile, "1234")
+        await api.login_with_sms(mobile, "654321")
+
+        # Or use existing token
+        api = ZrGasAPI(session, access_token="...", user_id="...", x_mas_app_info="...")
     """
 
     def __init__(
         self,
         session: aiohttp.ClientSession,
-        access_token: str,
+        access_token: str = "",
         user_id: str = "",
+        x_mas_app_info: str = "",
     ) -> None:
         """Initialize the API client.
 
         Args:
             session: aiohttp client session for making HTTP requests.
-            access_token: Access token obtained from the WeChat mini-program.
+            access_token: Access token (masToken) from login response.
             user_id: User identifier (passed as header in most API calls).
+            x_mas_app_info: x-mas-app-info value from login response (sid with prefix).
         """
         self._session = session
         self._access_token = access_token
         self._user_id = user_id
+        self._x_mas_app_info = x_mas_app_info
         self._salt = SIGN_SALT
+
+    @property
+    def access_token(self) -> str:
+        """Return the current access token."""
+        return self._access_token
+
+    @property
+    def user_id(self) -> str:
+        """Return the current user ID."""
+        return self._user_id
+
+    @property
+    def x_mas_app_info(self) -> str:
+        """Return the current x-mas-app-info header value."""
+        return self._x_mas_app_info
+
+    def get_captcha_url(self, mobile: str) -> str:
+        """Get the URL for the captcha image associated with a mobile number.
+
+        The captcha image is fetched as a GET request and displayed to the
+        user for manual entry.
+
+        Args:
+            mobile: Mobile phone number (11 digits).
+
+        Returns:
+            Full URL to the captcha image.
+        """
+        timestamp = str(int(time.time() * 1000))
+        return f"{BASE_URL}{ENDPOINT_CAPTCHA_IMG}?flag={mobile}&tn={timestamp}"
+
+    async def send_sms_code(self, mobile: str, captcha_code: str) -> None:
+        """Send an SMS verification code to the given mobile number.
+
+        Step 2 of the login flow. The user must first solve the captcha
+        image returned by ``get_captcha_url()``.
+
+        API endpoint: ``POST /user/sendsms3.do``
+        Body: ``{codeKey: mobile, codeKeyValue: captcha_code, mobile: mobile}``
+
+        Args:
+            mobile: Mobile phone number (11 digits).
+            captcha_code: The captcha text the user entered from the image.
+
+        Raises:
+            ZrGasSmsError: If the SMS code could not be sent
+                (wrong captcha, rate limited, etc.).
+        """
+        url = f"{BASE_URL}{ENDPOINT_SEND_SMS}"
+        data = {
+            "codeKey": mobile,
+            "codeKeyValue": captcha_code,
+            "mobile": mobile,
+        }
+
+        try:
+            result = await self._post_raw(url, data)
+        except Exception as err:
+            raise ZrGasSmsError(f"Failed to send SMS code: {err}") from err
+
+        status = result.get("status")
+        if status != 1:
+            message = result.get("message", "未知错误")
+            raise ZrGasSmsError(f"发送验证码失败: {message}")
+
+        _LOGGER.info("SMS code sent successfully to %s****%s", mobile[:3], mobile[-4:])
+
+    async def login_with_sms(
+        self, mobile: str, sms_code: str
+    ) -> dict[str, Any]:
+        """Login using mobile number and SMS verification code.
+
+        Step 3 of the login flow. On success, stores the returned
+        masToken, userId, and x-mas-app-info internally for subsequent
+        API calls.
+
+        API endpoint: ``POST /user/xcxMobileUserLogin``
+        Body: ``{mobile, code, channelType: 6, openId: "", unionId: ""}``
+
+        Response contains:
+        - ``masToken``: Access token for subsequent API calls
+        - ``sid``: Session ID (needs prefix "aaahg10001/" for x-mas-app-info header)
+        - ``data``: User info dict with ``id``, ``mobile``, etc.
+
+        Args:
+            mobile: Mobile phone number.
+            sms_code: The 6-digit SMS verification code.
+
+        Returns:
+            Full API response dict including user data.
+
+        Raises:
+            ZrGasAuthError: If login fails (wrong code, expired, etc.).
+        """
+        url = f"{BASE_URL}{ENDPOINT_LOGIN_SMS}"
+        data = {
+            "mobile": mobile,
+            "code": sms_code,
+            "channelType": "6",
+            "openId": "",
+            "unionId": "",
+        }
+
+        try:
+            result = await self._post_raw(url, data)
+        except Exception as err:
+            raise ZrGasAuthError(f"SMS login failed: {err}") from err
+
+        status = result.get("status")
+        if status != 1:
+            message = result.get("message", "未知错误")
+            raise ZrGasAuthError(f"登录失败: {message}")
+
+        login_data = result.get("data") or {}
+
+        # Extract and store credentials (mirrors loginOK handler in JS)
+        mas_token = login_data.get("masToken") or result.get("masToken") or ""
+        sid = login_data.get("sid") or result.get("sid") or ""
+        user_info = login_data.get("data") or login_data
+        uid = str(user_info.get("id") or "")
+
+        if not mas_token:
+            raise ZrGasAuthError("Login succeeded but no masToken returned")
+
+        # Store credentials for subsequent API calls
+        self._access_token = mas_token
+        self._user_id = uid
+        if sid:
+            self._x_mas_app_info = f"{X_MAS_SID_PREFIX}{sid}"
+
+        _LOGGER.info(
+            "SMS login successful (user_id=%s, sid=%s)",
+            uid,
+            "***" if sid else "(none)",
+        )
+
+        return result
+
+    async def _post_raw(
+        self,
+        url: str,
+        data: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Send a POST request and return the raw JSON response.
+
+        Unlike ``_post``, this does NOT check status codes or raise on
+        business errors. Used by login endpoints that need to inspect
+        the response before deciding what to do.
+
+        Args:
+            url: Full URL to POST to.
+            data: Request body data (form-encoded).
+            headers: Optional additional headers.
+
+        Returns:
+            Parsed JSON response dict.
+        """
+        request_headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        # Only include auth headers if we have them
+        if self._access_token:
+            request_headers["accessToken"] = self._access_token
+        if self._user_id:
+            request_headers["userId"] = self._user_id
+        if self._x_mas_app_info:
+            request_headers["x-mas-app-info"] = self._x_mas_app_info
+        if headers:
+            request_headers.update(headers)
+
+        async with self._session.post(url, headers=request_headers, data=data) as resp:
+            resp.raise_for_status()
+            return await resp.json()
 
     def _generate_signature(self, param: str, timestamp: str) -> str:
         """Generate an MD5 signature for API request authentication.
@@ -140,6 +335,8 @@ class ZrGasAPI:
         }
         if self._user_id:
             request_headers["userId"] = self._user_id
+        if self._x_mas_app_info:
+            request_headers["x-mas-app-info"] = self._x_mas_app_info
         if headers:
             request_headers.update(headers)
 

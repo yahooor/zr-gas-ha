@@ -5,8 +5,8 @@ ZR Gas (中燃在线) cloud API. It creates sensor entities for each
 bound gas customer account.
 
 Setup flow:
-  1. User provides accessToken (obtained from WeChat mini-program)
-  2. Integration validates token and discovers bound accounts
+  1. User logs in via SMS verification code (mobile + captcha + SMS code)
+  2. Integration discovers bound gas customer accounts
   3. For each account, a DataUpdateCoordinator is created
   4. Sensor platform is forwarded for entity creation
 """
@@ -34,6 +34,7 @@ from .const import (
     CONF_BALANCE_THRESHOLD,
     CONF_UPDATE_INTERVAL,
     CONF_USER_ID,
+    CONF_X_MAS_APP_INFO,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
@@ -62,6 +63,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     access_token = entry.data[CONF_ACCESS_TOKEN]
     user_id = entry.data.get(CONF_USER_ID, "")
+    x_mas_app_info = entry.data.get(CONF_X_MAS_APP_INFO, "")
     customers = entry.data.get("customers", [])
     update_interval_seconds = entry.options.get(
         CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
@@ -71,7 +73,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
 
     # Create API client
-    api = ZrGasAPI(session, access_token, user_id=user_id)
+    api = ZrGasAPI(
+        session,
+        access_token=access_token,
+        user_id=user_id,
+        x_mas_app_info=x_mas_app_info,
+    )
 
     # Create a coordinator for each customer account
     coordinators: dict[str, ZrGasDataUpdateCoordinator] = {}
