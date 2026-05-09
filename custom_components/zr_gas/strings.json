@@ -3,8 +3,19 @@
     "step": {
       "user": {
         "title": "中燃在线登录",
-        "description": "输入注册时使用的手机号码",
+        "description": "选择登录方式。\n短信登录需要图形验证码和短信验证码；Token 导入可直接粘贴已获取的凭据。",
         "data": {
+          "auth_method": "登录方式",
+          "mobile": "手机号码"
+        }
+      },
+      "token": {
+        "title": "Token 导入",
+        "description": "直接粘贴已获取的登录凭据（可通过 API 或抓包工具获取）。必填项：Access Token 和 User ID。",
+        "data": {
+          "access_token": "Access Token（必填）",
+          "user_id": "User ID（必填）",
+          "x_mas_app_info": "X-MAS-App-Info",
           "mobile": "手机号码"
         }
       },
@@ -28,6 +39,7 @@
       }
     },
     "error": {
+      "token_required": "Access Token 和 User ID 为必填项",
       "invalid_mobile": "请输入正确的11位手机号码",
       "captcha_required": "请输入图形验证码",
       "sms_code_required": "请输入短信验证码",
