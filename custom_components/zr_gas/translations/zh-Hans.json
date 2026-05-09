@@ -91,6 +91,24 @@
       "monthly_cost": {
         "name": "月费用"
       }
+    },
+    "button": {
+      "refresh": {
+        "name": "刷新数据"
+      }
+    }
+  },
+  "issues": {
+    "token_expired": {
+      "title": "中燃在线 Token 已过期",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "重新认证",
+            "description": "账户 {cust_name} 的 Token 已过期，请点击提交重新登录。"
+          }
+        }
+      }
     }
   }
 }
