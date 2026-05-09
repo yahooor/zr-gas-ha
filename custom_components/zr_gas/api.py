@@ -20,6 +20,7 @@ Login flow (from pages-login-login.js):
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import time
@@ -128,10 +129,55 @@ class ZrGasAPI:
         timestamp = str(int(time.time() * 1000))
         return f"{BASE_URL}{ENDPOINT_CAPTCHA_IMG}?flag={mobile}&tn={timestamp}"
 
+    async def fetch_captcha_image(self, mobile: str) -> bytes:
+        """Fetch the captcha image bytes for a mobile number.
+
+        Instead of passing the URL to the frontend (which fails due to
+        session/cookie issues), we fetch the image bytes here and encode
+        them as a base64 data URI.
+
+        Args:
+            mobile: Mobile phone number (11 digits).
+
+        Returns:
+            Raw image bytes.
+
+        Raises:
+            ZrGasApiError: If the image cannot be fetched.
+        """
+        url = self.get_captcha_url(mobile)
+        try:
+            async with self._session.get(url) as response:
+                response.raise_for_status()
+                image_bytes = await response.read()
+                _LOGGER.debug(
+                    "Fetched captcha image (%d bytes) for %s",
+                    len(image_bytes),
+                    mobile,
+                )
+                return image_bytes
+        except Exception as err:
+            raise ZrGasApiError(f"Failed to fetch captcha image: {err}") from err
+
+    def encode_captcha_image(self, image_bytes: bytes) -> str:
+        """Encode captcha image bytes to a base64 data URI.
+
+        This allows the image to be embedded directly in HTML,
+        avoiding cross-origin or session issues in the browser.
+
+        Args:
+            image_bytes: Raw image bytes from ``fetch_captcha_image()``.
+
+        Returns:
+            Data URI string: ``data:image/png;base64,...``
+        """
+        base64_str = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:image/png;base64,{base64_str}"
+
     async def send_sms_code(self, mobile: str, captcha_code: str) -> None:
         """Send an SMS verification code to the given mobile number.
 
-        Step 2 of the login flow. The user must first solve the captcha
+        Step2 of the login flow. The user must first solve the captcha
         image returned by ``get_captcha_url()``.
 
         API endpoint: ``POST /user/sendsms3.do``
@@ -169,7 +215,7 @@ class ZrGasAPI:
     ) -> dict[str, Any]:
         """Login using mobile number and SMS verification code.
 
-        Step 3 of the login flow. On success, stores the returned
+        Step3 of the login flow. On success, stores the returned
         masToken, userId, and x-mas-app-info internally for subsequent
         API calls.
 
@@ -354,7 +400,11 @@ class ZrGasAPI:
             resp.raise_for_status()
             result: dict[str, Any] = await resp.json()
 
-        _LOGGER.debug("Response status=%s message=%s", result.get("status"), result.get("message"))
+        _LOGGER.debug(
+            "Response status=%s message=%s",
+            result.get("status"),
+            result.get("message"),
+        )
 
         # Check response status
         # Confirmed: API returns {"status": 1, "message": "...", "data": {...}}
