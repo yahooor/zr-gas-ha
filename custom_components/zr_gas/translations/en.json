@@ -10,7 +10,7 @@
       },
       "captcha": {
         "title": "Captcha Verification",
-        "description": "{captcha_info}",
+        "description": "1. {link_left}Click here to view captcha image{link_right} (opens in new tab)\n2. Read the code and enter it below\n3. Submit to send an SMS verification code",
         "data": {
           "captcha_code": "Captcha Code"
         }
@@ -59,7 +59,7 @@
     "step": {
       "reauth_captcha": {
         "title": "Re-authentication - Captcha",
-        "description": "ZR Gas token has expired. Please verify again.\nMobile: {mobile}\n\n{captcha_info}",
+        "description": "ZR Gas token has expired. Please verify again.\nMobile: {mobile}\n\n1. {link_left}Click here to view captcha image{link_right}\n2. Read the code and enter it to send SMS",
         "data": {
           "captcha_code": "Captcha Code"
         }
