@@ -10,7 +10,7 @@
       },
       "captcha": {
         "title": "图形验证码",
-        "description": "请输入下方图形验证码，点击提交后将发送短信验证码\n\n![验证码]({captcha_url})",
+        "description": "请查看下方图形验证码，输入后点击提交发送短信\n\n![验证码]({captcha_url})\n\n[点击此处查看验证码]({captcha_url})（图片未显示时使用）",
         "data": {
           "captcha_code": "图形验证码"
         }
@@ -59,7 +59,7 @@
     "step": {
       "reauth_captcha": {
         "title": "重新认证 - 图形验证码",
-        "description": "中燃在线 Token 已过期，请重新验证\n手机号: {mobile}\n\n![验证码]({captcha_url})",
+        "description": "中燃在线 Token 已过期，请重新验证\n手机号: {mobile}\n\n![验证码]({captcha_url})\n\n[点击此处查看验证码]({captcha_url})（图片未显示时使用）",
         "data": {
           "captcha_code": "图形验证码"
         }

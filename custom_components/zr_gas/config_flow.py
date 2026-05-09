@@ -5,6 +5,13 @@ Provides a user-friendly SMS login flow:
   2. User views captcha image, enters captcha code, and sends SMS
   3. User enters SMS verification code to complete login
 
+Captcha image display strategy:
+  The remote captcha URL cannot be loaded directly in the HA frontend
+  (CORS / session cookie issues), and base64 data URIs are stripped by
+  HA's DOMPurify sanitizer. Instead, we fetch the captcha image server-side,
+  store it in hass.data, and serve it via a custom HTTP endpoint
+  (/api/zr_gas/captcha/{token}). This ensures same-origin access.
+
 Also includes:
   - OptionsFlow for adjusting refresh interval and balance threshold
   - ReauthFlow that re-uses the SMS login when the token expires
@@ -13,6 +20,7 @@ Also includes:
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 import voluptuous as vol
@@ -35,6 +43,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
+from .views import ZrGasCaptchaView
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +56,31 @@ class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
 
 
+def _register_captcha_view(hass) -> None:
+    """Register the captcha HTTP view if not already registered."""
+    hass.data.setdefault(DOMAIN, {})
+    if not hass.data[DOMAIN].get("captcha_view_registered"):
+        hass.http.register_view(ZrGasCaptchaView())
+        hass.data[DOMAIN]["captcha_view_registered"] = True
+        _LOGGER.debug("Registered ZrGasCaptchaView")
+
+
+def _store_captcha_image(hass, image_bytes: bytes) -> str:
+    """Store a captcha image and return a URL token.
+
+    Returns:
+        URL path for the captcha image, e.g. /api/zr_gas/captcha/{uuid}
+    """
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault("captcha_images", {})
+
+    token = str(uuid.uuid4())
+    hass.data[DOMAIN]["captcha_images"][token] = image_bytes
+    captcha_url = f"/api/zr_gas/captcha/{token}"
+    _LOGGER.debug("Stored captcha image with token %s", token[:8])
+    return captcha_url
+
+
 class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for 中燃在线.
 
@@ -54,13 +88,13 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """
 
     VERSION = 1
-    MINOR_VERSION = 3
+    MINOR_VERSION = 4
 
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._mobile: str = ""
         self._api: ZrGasAPI | None = None
-        self._captcha_data_uri: str = ""
+        self._captcha_url: str = ""
         self._discovered_customers: list[dict[str, str]] = []
 
     async def async_step_user(
@@ -77,6 +111,10 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._mobile = mobile
                 session = async_get_clientsession(self.hass)
                 self._api = ZrGasAPI(session)
+
+                # Register the captcha HTTP view (idempotent)
+                _register_captcha_view(self.hass)
+
                 return await self.async_step_captcha()
 
         return self.async_show_form(
@@ -96,8 +134,8 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self._api:
             try:
                 captcha_bytes = await self._api.fetch_captcha_image(self._mobile)
-                self._captcha_data_uri = self._api.encode_captcha_image(captcha_bytes)
-                description_placeholders["captcha_url"] = self._captcha_data_uri
+                self._captcha_url = _store_captcha_image(self.hass, captcha_bytes)
+                description_placeholders["captcha_url"] = self._captcha_url
             except ZrGasApiError as err:
                 _LOGGER.error("Failed to fetch captcha image: %s", err)
                 errors["base"] = "connection_error"
@@ -120,8 +158,8 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Re-fetch captcha on failure (it may have expired)
                     try:
                         captcha_bytes = await self._api.fetch_captcha_image(self._mobile)
-                        self._captcha_data_uri = self._api.encode_captcha_image(captcha_bytes)
-                        description_placeholders["captcha_url"] = self._captcha_data_uri
+                        self._captcha_url = _store_captcha_image(self.hass, captcha_bytes)
+                        description_placeholders["captcha_url"] = self._captcha_url
                     except ZrGasApiError:
                         pass
                 except Exception as err:
@@ -230,6 +268,10 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._mobile = entry_data.get(CONF_MOBILE, "")
         session = async_get_clientsession(self.hass)
         self._api = ZrGasAPI(session)
+
+        # Register the captcha HTTP view (idempotent)
+        _register_captcha_view(self.hass)
+
         return await self.async_step_reauth_captcha()
 
     async def async_step_reauth_captcha(
@@ -243,8 +285,8 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self._api:
             try:
                 captcha_bytes = await self._api.fetch_captcha_image(self._mobile)
-                self._captcha_data_uri = self._api.encode_captcha_image(captcha_bytes)
-                description_placeholders["captcha_url"] = self._captcha_data_uri
+                self._captcha_url = _store_captcha_image(self.hass, captcha_bytes)
+                description_placeholders["captcha_url"] = self._captcha_url
             except ZrGasApiError as err:
                 _LOGGER.error("Failed to fetch captcha image: %s", err)
                 errors["base"] = "connection_error"
@@ -270,8 +312,8 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Re-fetch captcha on failure
                     try:
                         captcha_bytes = await self._api.fetch_captcha_image(self._mobile)
-                        self._captcha_data_uri = self._api.encode_captcha_image(captcha_bytes)
-                        description_placeholders["captcha_url"] = self._captcha_data_uri
+                        self._captcha_url = _store_captcha_image(self.hass, captcha_bytes)
+                        description_placeholders["captcha_url"] = self._captcha_url
                     except ZrGasApiError:
                         pass
                 except Exception as err:
