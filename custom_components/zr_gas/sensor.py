@@ -131,7 +131,7 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
         self._attr_device_info = {
             "identifiers": {(DOMAIN, cust_code)},
             "name": f"中燃燃气 {cust_code_short}",
-            "manufacturer": "中国燃气",
+            "manufacturer": "中燃在线",
             "model": "在线账户",
         }
 
