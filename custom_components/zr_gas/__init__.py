@@ -23,6 +23,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
@@ -42,7 +43,7 @@ from .models import ZrGasBill, ZrGasDeviceData
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.BUTTON]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -269,6 +270,18 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             )
 
         except ConfigEntryAuthFailed:
+            # Notify user about expired token via HA repairs/notifications
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"token_expired_{self.cust_code}",
+                is_fixable=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="token_expired",
+                translation_placeholders={
+                    "cust_name": self.cust_name,
+                },
+            )
             raise
         except UpdateFailed:
             raise
