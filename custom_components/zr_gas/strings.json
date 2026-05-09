@@ -8,13 +8,18 @@
           "mobile": "手机号码"
         }
       },
-      "sms": {
-        "title": "验证码登录",
-        "description": "1. 先输入图形验证码，点击「发送验证码」\n2. 收到短信后输入验证码完成登录\n\n图形验证码: ![验证码]({captcha_url})",
+      "captcha": {
+        "title": "图形验证码",
+        "description": "请输入下方图形验证码，点击提交后将发送短信验证码\n\n![验证码]({captcha_url})",
         "data": {
-          "captcha_code": "图形验证码",
-          "sms_code": "短信验证码",
-          "send_sms": "发送验证码"
+          "captcha_code": "图形验证码"
+        }
+      },
+      "sms_code": {
+        "title": "短信验证码",
+        "description": "短信验证码已发送至您的手机，请输入收到的验证码完成登录",
+        "data": {
+          "sms_code": "短信验证码"
         }
       },
       "discover": {
@@ -52,13 +57,18 @@
   },
   "reauth": {
     "step": {
-      "reauth_sms": {
-        "title": "重新认证",
-        "description": "中燃在线 Token 已过期，请重新验证\n手机号: {mobile}\n\n图形验证码: ![验证码]({captcha_url})",
+      "reauth_captcha": {
+        "title": "重新认证 - 图形验证码",
+        "description": "中燃在线 Token 已过期，请重新验证\n手机号: {mobile}\n\n![验证码]({captcha_url})",
         "data": {
-          "captcha_code": "图形验证码",
-          "sms_code": "短信验证码",
-          "send_sms": "发送验证码"
+          "captcha_code": "图形验证码"
+        }
+      },
+      "reauth_sms_code": {
+        "title": "重新认证 - 短信验证码",
+        "description": "短信验证码已发送至您的手机，请输入收到的验证码",
+        "data": {
+          "sms_code": "短信验证码"
         }
       }
     },
