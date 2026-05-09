@@ -91,6 +91,24 @@
       "monthly_cost": {
         "name": "Monthly Cost"
       }
+    },
+    "button": {
+      "refresh": {
+        "name": "Refresh Data"
+      }
+    }
+  },
+  "issues": {
+    "token_expired": {
+      "title": "ZR Gas Token Expired",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Re-authentication",
+            "description": "Token for account {cust_name} has expired. Click submit to re-login."
+          }
+        }
+      }
     }
   }
 }
