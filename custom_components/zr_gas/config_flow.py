@@ -60,6 +60,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._mobile: str = ""
         self._api: ZrGasAPI | None = None
+        self._captcha_data_uri: str = ""
         self._discovered_customers: list[dict[str, str]] = []
 
     async def async_step_user(
@@ -98,10 +99,13 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Step 2: Enter captcha code and SMS verification code.
 
-        The captcha image URL is generated from the API and shown in the
-        form's description_placeholders. User reads the captcha, enters
-        it, then requests an SMS code. After receiving the SMS, they
-        enter the code to proceed.
+        The captcha image is fetched server-side and embedded as a base64
+        data URI in the form description_placeholders. This avoids
+        cross-origin and session/cookie issues that prevent the browser
+        from loading the remote captcha URL directly.
+
+        User reads the captcha, enters it, then requests an SMS code.
+        After receiving the SMS, they enter the code to proceed.
 
         This step handles two actions:
         - "send_sms": Sends the SMS code (requires captcha_code)
@@ -116,10 +120,15 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         description_placeholders: dict[str, str] = {}
 
-        # Generate captcha URL for display
+        # Fetch captcha image and convert to base64 data URI
         if self._api:
-            captcha_url = self._api.get_captcha_url(self._mobile)
-            description_placeholders["captcha_url"] = captcha_url
+            try:
+                captcha_bytes = await self._api.fetch_captcha_image(self._mobile)
+                self._captcha_data_uri = self._api.encode_captcha_image(captcha_bytes)
+                description_placeholders["captcha_url"] = self._captcha_data_uri
+            except ZrGasApiError as err:
+                _LOGGER.error("Failed to fetch captcha image: %s", err)
+                errors["base"] = "connection_error"
 
         if user_input is not None:
             captcha_code = user_input.get("captcha_code", "").strip()
@@ -291,9 +300,16 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         description_placeholders: dict[str, str] = {}
 
+        # Fetch captcha image and convert to base64 data URI
         if self._api:
-            captcha_url = self._api.get_captcha_url(self._mobile)
-            description_placeholders["captcha_url"] = captcha_url
+            try:
+                captcha_bytes = await self._api.fetch_captcha_image(self._mobile)
+                self._captcha_data_uri = self._api.encode_captcha_image(captcha_bytes)
+                description_placeholders["captcha_url"] = self._captcha_data_uri
+            except ZrGasApiError as err:
+                _LOGGER.error("Failed to fetch captcha image: %s", err)
+                errors["base"] = "connection_error"
+
             description_placeholders["mobile"] = (
                 f"{self._mobile[:3]}****{self._mobile[-4:]}"
                 if len(self._mobile) == 11
