@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "中燃在线登录",
-        "description": "输入在中国燃气注册的手机号码",
+        "description": "输入注册时使用的手机号码",
         "data": {
           "mobile": "手机号码"
         }
