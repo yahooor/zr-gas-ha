@@ -3,8 +3,19 @@
     "step": {
       "user": {
         "title": "ZR Gas Login",
-        "description": "Enter your registered mobile phone number",
+        "description": "Choose login method.\nSMS login requires captcha and SMS verification; Token import lets you paste credentials directly.",
         "data": {
+          "auth_method": "Login Method",
+          "mobile": "Mobile Number"
+        }
+      },
+      "token": {
+        "title": "Token Import",
+        "description": "Paste pre-obtained login credentials (from API or packet capture). Required: Access Token and User ID.",
+        "data": {
+          "access_token": "Access Token (required)",
+          "user_id": "User ID (required)",
+          "x_mas_app_info": "X-MAS-App-Info",
           "mobile": "Mobile Number"
         }
       },
@@ -28,6 +39,7 @@
       }
     },
     "error": {
+      "token_required": "Access Token and User ID are required",
       "invalid_mobile": "Please enter a valid 11-digit mobile number",
       "captcha_required": "Please enter the captcha code",
       "sms_code_required": "Please enter the SMS code",
