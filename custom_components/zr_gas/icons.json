@@ -1,9 +1,9 @@
 {
   "entity": {
     "sensor": {
-      "zr_gas_balance": "mdi:cash",
-      "zr_gas_monthly_usage": "mdi:fire",
-      "zr_gas_monthly_cost": "mdi:currency-cny"
+      "balance": "mdi:cash",
+      "monthly_usage": "mdi:fire",
+      "monthly_cost": "mdi:currency-cny"
     }
   }
 }
