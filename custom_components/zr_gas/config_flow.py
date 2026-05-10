@@ -67,7 +67,6 @@ async def _fetch_and_save_captcha(
     Returns:
         The /local/ URL for the saved image, or None on failure.
     """
-    import aiofiles
     import time
 
     # Ensure www/zr_gas_captcha/ directory exists
@@ -104,8 +103,11 @@ async def _fetch_and_save_captcha(
     # Save to www/zr_gas_captcha/{mobile}.png
     filepath = os.path.join(captcha_dir, f"{mobile}.png")
     try:
-        async with aiofiles.open(filepath, "wb") as f:
-            await f.write(image_data)
+        def _write_file(path: str, data: bytes) -> None:
+            with open(path, "wb") as f:
+                f.write(data)
+
+        await hass.async_add_executor_job(_write_file, filepath, image_data)
     except Exception as err:
         _LOGGER.warning("Failed to save captcha image: %s", err)
         return None
