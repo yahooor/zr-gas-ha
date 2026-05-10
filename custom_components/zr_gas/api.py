@@ -195,8 +195,8 @@ class ZrGasAPI:
             for cookie in login_session.cookie_jar:
                 cookie_str += f"{cookie.key}={cookie.value}(path={cookie['path']}) "
             _LOGGER.debug(
-                "SMS send: mobile=%s, code=%s, session_cookies=[%s]",
-                mobile, captcha_code, cookie_str,
+                "SMS send: mobile=%s****%s, code=****, session_cookies=[%s]",
+                mobile[:3], mobile[-4:], cookie_str,
             )
 
             request_headers = {

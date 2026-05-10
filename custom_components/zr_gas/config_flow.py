@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -30,6 +31,7 @@ from .const import (
     CONF_ACCESS_TOKEN,
     CONF_BALANCE_THRESHOLD,
     CONF_BILL_YEARS,
+    CONF_CUSTOMERS,
     CONF_MOBILE,
     CONF_TIER_1_PRICE,
     CONF_TIER_2_PRICE,
@@ -436,7 +438,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_USER_ID: self._api.user_id,
                 CONF_X_MAS_APP_INFO: self._api.x_mas_app_info,
                 CONF_MOBILE: self._mobile,
-                "customers": self._discovered_customers,
+                CONF_CUSTOMERS: self._discovered_customers,
             },
             options={
                 CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
@@ -650,8 +652,24 @@ class ZrGasOptionsFlow(config_entries.OptionsFlow):
         Returns:
             FlowResult to update options or show the form.
         """
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # Validate tier ordering
+            tier_2 = user_input.get(CONF_TIER_2_START, DEFAULT_TIER_2_START)
+            tier_3 = user_input.get(CONF_TIER_3_START, DEFAULT_TIER_3_START)
+            if tier_3 <= tier_2:
+                errors["base"] = "invalid_tier_config"
+
+            # Validate cycle start format
+            cycle_start = user_input.get(
+                CONF_TIER_CYCLE_START, DEFAULT_TIER_CYCLE_START
+            )
+            if not re.match(r"^\d{2}-\d{2}$", cycle_start):
+                errors["base"] = "invalid_tier_cycle_format"
+
+            if not errors:
+                return self.async_create_entry(title="", data=user_input)
 
         return self.async_show_form(
             step_id="init",
@@ -713,4 +731,5 @@ class ZrGasOptionsFlow(config_entries.OptionsFlow):
                     ): str,
                 }
             ),
+            errors=errors,
         )

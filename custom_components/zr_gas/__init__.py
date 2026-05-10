@@ -35,6 +35,7 @@ from .const import (
     CONF_ACCESS_TOKEN,
     CONF_BALANCE_THRESHOLD,
     CONF_BILL_YEARS,
+    CONF_CUSTOMERS,
     CONF_TIER_1_PRICE,
     CONF_TIER_2_PRICE,
     CONF_TIER_2_START,
@@ -168,7 +169,7 @@ def _calculate_tier_cycle_start(tier_cycle_start_md: str) -> str:
 def _calculate_annual_usage(
     monthly_stats: list[MonthlyStat],
     tier_config: TierConfig,
-) -> tuple[float, int, float]:
+) -> tuple[float, int, float, str]:
     """计算当前阶梯周期的累计用气量。
 
     从阶梯周期起始月份开始累加月度用量。
@@ -178,11 +179,11 @@ def _calculate_annual_usage(
         tier_config: 阶梯气价配置
 
     Returns:
-        (annual_usage, current_tier, current_tier_price)
+        (annual_usage, current_tier, current_tier_price, cycle_start)
     """
-    cycle_start_str = _calculate_tier_cycle_start(tier_config.tier_cycle_start_md)
-    cycle_year = int(cycle_start_str[:4])
-    cycle_month = int(cycle_start_str[5:7])
+    cycle_start = _calculate_tier_cycle_start(tier_config.tier_cycle_start_md)
+    cycle_year = int(cycle_start[:4])
+    cycle_month = int(cycle_start[5:7])
 
     annual_usage = 0.0
     for ms in monthly_stats:
@@ -199,7 +200,7 @@ def _calculate_annual_usage(
             annual_usage += ms.gas_num
 
     tier_num, tier_price, _remaining = tier_config.get_tier_info(annual_usage)
-    return annual_usage, tier_num, tier_price
+    return annual_usage, tier_num, tier_price, cycle_start
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -221,7 +222,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     access_token = entry.data[CONF_ACCESS_TOKEN]
     user_id = entry.data.get(CONF_USER_ID, "")
     x_mas_app_info = entry.data.get(CONF_X_MAS_APP_INFO, "")
-    customers = entry.data.get("customers", [])
+    customers = entry.data.get(CONF_CUSTOMERS, [])
     update_interval_seconds = entry.options.get(
         CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
     )
@@ -380,7 +381,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
         """
         try:
             # Parallel data fetching for better performance
-            now = datetime.now()
+            now = dt_util.now()
             current_period = now.strftime("%Y%m")
             # 可配置的账单查询范围
             start_year = now.year - self.bill_years
@@ -424,6 +425,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
 
             bill_list: list[ZrGasBill] = bills if isinstance(bills, list) else []
             if bill_list:
+                bill_list.sort(key=lambda b: b.period)
                 # Try to find the bill matching the current period first
                 current_bill = None
                 for bill in bill_list:
@@ -442,11 +444,8 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             yearly_stats = _calculate_yearly_stats(monthly_stats)
 
             # ── 阶梯气价计算 ──────────────────────────────────
-            annual_usage, current_tier, current_tier_price = (
+            annual_usage, current_tier, current_tier_price, tier_cycle_start = (
                 _calculate_annual_usage(monthly_stats, self.tier_config)
-            )
-            tier_cycle_start = _calculate_tier_cycle_start(
-                self.tier_config.tier_cycle_start_md
             )
 
             return ZrGasDeviceData(

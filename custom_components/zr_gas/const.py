@@ -20,6 +20,7 @@ CONF_TIER_CYCLE_START = "tier_cycle_start_md"  # 阶梯周期起始月日 (MM-DD
 
 # 账单查询范围配置项
 CONF_BILL_YEARS = "bill_query_years"  # 查询年数
+CONF_CUSTOMERS = "customers"  # 已绑定的燃气客户列表
 
 # Defaults
 DEFAULT_UPDATE_INTERVAL = 21600  # 6 hours in seconds
