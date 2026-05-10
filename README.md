@@ -139,10 +139,13 @@ low_threshold: 50   # 余额预警阈值（默认 50 元）
 
 ## 更新日志
 
-### v0.10.2 — 移除冗余 state_class
+### v0.10.2 — 移除冗余 state_class + HACS 配置优化
 
 **代码清理：**
 - **移除**: `sensor.py` — monthly_usage/monthly_cost/owe_money 的 `state_class` 字段（无 state_class 时 HA 不参与长期统计，避免月度切换时的异常行为）
+
+**改进：**
+- **新增**: `hacs.json` — 添加 `zip_release: true` + `filename` 配置，HACS 自动识别 Release zip 文件
 
 ### v0.10.1 — 代码审查修复（8 项修复）
 
