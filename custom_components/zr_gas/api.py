@@ -262,9 +262,10 @@ class ZrGasAPI:
         #   status=1 → success, status=0 → may also be success ("操作成功")
         #   status=2 → verification code expired
         #   status=-1 → wrong captcha / input error
-        if status == 2:
+        # NOTE: API may return status as string ("1") or int (1)
+        if status in (2, "2"):
             raise ZrGasSmsError(f"发送验证码失败: 验证码已过期，请重新获取")
-        if status not in (0, 1) and "成功" not in message:
+        if str(status) not in ("0", "1") and "成功" not in message:
             raise ZrGasSmsError(f"发送验证码失败: {message or '未知错误'}")
 
         _LOGGER.info("SMS code sent successfully to %s****%s", mobile[:3], mobile[-4:])
@@ -330,17 +331,18 @@ class ZrGasAPI:
         #   status=0 → may also be success (some endpoints use 0 for OK)
         #   status=2 → verification code expired ("请重新获取验证码")
         #   status=-1 → wrong verification code ("验证码输入不正确")
-        if status == 2:
+        # NOTE: API may return status as string ("1") or int (1)
+        if status in (2, "2"):
             raise ZrGasAuthError(f"登录失败: 验证码已过期，请重新获取")
-        if status == -1:
+        if status in (-1, "-1"):
             raise ZrGasAuthError(f"登录失败: {message or '验证码输入不正确'}")
-        if status not in (0, 1) and "成功" not in message:
+        if str(status) not in ("0", "1") and "成功" not in message:
             raise ZrGasAuthError(f"登录失败: {message or '未知错误'}")
 
         # Check if we actually got a token (some responses have status=0 but no token)
         login_data = result.get("data") or {}
         mas_token = login_data.get("masToken") or result.get("masToken") or ""
-        if not mas_token and status not in (0, 1):
+        if not mas_token and str(status) not in ("0", "1"):
             raise ZrGasAuthError(f"登录失败: {message or '未获取到token'}")
 
         login_data = result.get("data") or {}
@@ -495,14 +497,22 @@ class ZrGasAPI:
 
         # Check response status
         # Confirmed: API returns {"status": 1, "message": "...", "data": {...}}
+        # NOTE: checkMasInfo returns {"code": 200, "success": true, "message": "token有效"}
+        #       without a "status" field — so also check code/success.
+        # NOTE: API sometimes returns status as string "1" instead of int 1
         status = result.get("status")
+        code = result.get("code")
+        success = result.get("success")
         message = result.get("message", "")
 
-        if status == 1:
+        if status in (1, "1") or code in (200, "200") or success is True:
             return result
 
         # Token invalid/expired based on response message
-        if "token" in message.lower() or "登录" in message:
+        # IMPORTANT: "token有效" means token IS valid, must NOT be treated as error
+        if message and "token" in message.lower() and "有效" not in message:
+            raise ZrGasAuthError(f"Auth failed: {message}")
+        if "登录" in message and "成功" not in message:
             raise ZrGasAuthError(f"Auth failed: {message}")
 
         raise ZrGasApiError(f"API error (status={status}): {message}")
@@ -554,7 +564,7 @@ class ZrGasAPI:
         result = await self._post(url, data, as_json=True)
 
         # Confirmed: response has message "token有效" when valid
-        if result.get("message") == "token有效" or result.get("status") == 1:
+        if result.get("message") == "token有效" or result.get("status") in (1, "1"):
             return result
 
         raise ZrGasAuthError(f"Token validation failed: {result.get('message', 'unknown')}")
@@ -656,11 +666,35 @@ class ZrGasAPI:
         except (ValueError, TypeError):
             balance = 0.0
 
+        # Extract additional fields from API response
+        def _float(val, default=0.0):
+            try:
+                return float(val) if val is not None else default
+            except (ValueError, TypeError):
+                return default
+
+        def _int(val, default=0):
+            try:
+                return int(float(val)) if val is not None else default
+            except (ValueError, TypeError):
+                return default
+
         return ZrGasCustomerDetail(
             cust_code=info.get("custCode", cust_code),
             cust_name=info.get("custName", cust_name),
             cust_address=info.get("address", ""),
             balance=balance,
+            owe_money=_float(info.get("oweMoney")),
+            last_record=_float(info.get("lastRecord")),
+            qty_meter_balance=_float(info.get("qtyMeterBalance")),
+            purch_times=_int(info.get("purchTimes")),
+            last_record_time=info.get("lastRecordTime", ""),
+            meter_no=info.get("meterNo", ""),
+            meter_form_name=info.get("meterFormName", ""),
+            card_no=info.get("cardNo", ""),
+            comp_name=info.get("compName", ""),
+            cust_status=info.get("custStatus", ""),
+            fee=info.get("fee", ""),
         )
 
     async def get_customer_money_list(
