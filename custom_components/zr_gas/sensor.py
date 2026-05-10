@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -32,10 +33,38 @@ from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+import homeassistant.util.dt as dt_util
 
-from . import ZrGasDataUpdateCoordinator
 from .const import DOMAIN
 from .models import ZrGasDeviceData
+
+if TYPE_CHECKING:
+    from . import ZrGasDataUpdateCoordinator
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    """Parse API date string to a timezone-aware datetime.
+
+    The API returns dates like "2026-04-21" or "2026-04-21 10:30:00".
+    HA requires a timezone-aware datetime for TIMESTAMP device_class sensors.
+    """
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        # Try full datetime format first
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+            # Attach local timezone (HA default for naive datetimes)
+            return parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+    except Exception:
+        pass
+    return None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -158,7 +187,7 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         translation_key="last_record_time",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:calendar-clock",
-        value_fn=lambda data: data.last_record_time or None,
+        value_fn=lambda data: _parse_timestamp(data.last_record_time),
         attributes_fn=lambda data: {
             **_device_attributes(data),
             "last_record": data.last_record,

@@ -122,6 +122,15 @@ low_threshold: 50   # 余额预警阈值（默认 50 元）
 
 ## 更新日志
 
+### v0.9.0 — Bug 修复 + 代码清理
+
+**Bug 修复：**
+- **修复**: 最后抄表日期传感器 (`TIMESTAMP`) 崩溃 — API 返回日期字符串 `"2026-04-21"` 需解析为带时区的 `datetime` 对象
+- **修复**: sensor.py 和 button.py 的 `ZrGasDataUpdateCoordinator` 导入改用 `TYPE_CHECKING` 保护，避免潜在循环导入
+
+**代码清理：**
+- **移除**: `api.py` 中未使用的 `_post_raw` 死代码
+
 ### v0.8.0 — 5 个新传感器 + Bug 修复 + 前端卡片
 
 **新功能：**

@@ -370,45 +370,6 @@ class ZrGasAPI:
 
         return result
 
-    async def _post_raw(
-        self,
-        url: str,
-        data: dict[str, Any],
-        headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        """Send a POST request and return the raw JSON response.
-
-        Unlike ``_post``, this does NOT check status codes or raise on
-        business errors. Used by login endpoints that need to inspect
-        the response before deciding what to do.
-
-        Args:
-            url: Full URL to POST to.
-            data: Request body data (form-encoded).
-            headers: Optional additional headers.
-
-        Returns:
-            Parsed JSON response dict.
-        """
-        request_headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        }
-        # Only include auth headers if we have them
-        if self._access_token:
-            request_headers["accessToken"] = self._access_token
-        if self._user_id:
-            request_headers["userId"] = self._user_id
-        if self._x_mas_app_info:
-            request_headers["x-mas-app-info"] = self._x_mas_app_info
-        if headers:
-            request_headers.update(headers)
-
-        async with self._session.post(url, headers=request_headers, data=data) as resp:
-            resp.raise_for_status()
-            return await resp.json()
-
     def _generate_signature(self, param: str, timestamp: str) -> str:
         """Generate an MD5 signature for API request authentication.
 
