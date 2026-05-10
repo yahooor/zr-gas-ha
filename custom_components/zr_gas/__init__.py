@@ -274,6 +274,17 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 monthly_cost=monthly_cost,
                 period=period,
                 unit_price=unit_price,
+                owe_money=detail.owe_money,
+                last_record=detail.last_record,
+                qty_meter_balance=detail.qty_meter_balance,
+                purch_times=detail.purch_times,
+                last_record_time=detail.last_record_time,
+                meter_no=detail.meter_no,
+                meter_form_name=detail.meter_form_name,
+                card_no=detail.card_no,
+                comp_name=detail.comp_name,
+                cust_status=detail.cust_status,
+                fee=detail.fee,
             )
 
         except ConfigEntryAuthFailed:
