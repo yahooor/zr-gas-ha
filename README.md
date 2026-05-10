@@ -122,6 +122,19 @@ low_threshold: 50   # 余额预警阈值（默认 50 元）
 
 ## 更新日志
 
+### v0.9.1 — 代码清理
+
+**代码清理：**
+- **移除**: `api.py` 中未使用的 `import base64`
+- **移除**: `api.py` 中多余的 `self._salt` 实例变量，改用 `SIGN_SALT` 常量
+- **移除**: `api.py` 中已废弃的 `fetch_captcha_image()` 方法（已由 config_flow 的 `_fetch_and_save_captcha` 替代）
+- **修复**: `api.py` 中 `login_with_sms` 的 `login_data`/`mas_token` 重复赋值逻辑
+- **修复**: `api.py` 中 `init_request` 状态检查从 `== 1` 改为 `str(status) in ("0", "1")`，兼容字符串/整数返回
+- **移除**: `config_flow.py` 中未使用的 `_get_captcha_local_url()` 函数
+- **移除**: `config_flow.py` 中所有内联 import（`import time`、`import aiohttp as _aiohttp`），统一到顶层
+- **移除**: `config_flow.py` 中重复的 `import os`
+- **补充**: `config_flow.py` 添加 `HomeAssistant` 类型导入
+
 ### v0.9.0 — Bug 修复 + 代码清理
 
 **Bug 修复：**
