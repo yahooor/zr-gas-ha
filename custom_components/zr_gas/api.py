@@ -20,7 +20,6 @@ Login flow (from pages-login-login.js):
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import logging
 import time
@@ -97,7 +96,6 @@ class ZrGasAPI:
         self._access_token = access_token
         self._user_id = user_id
         self._x_mas_app_info = x_mas_app_info
-        self._salt = SIGN_SALT
         # Independent session with a REAL CookieJar for the login flow.
         # HA's shared session (async_get_clientsession) uses DummyCookieJar
         # which drops cookies. The login flow requires cookies to persist
@@ -163,48 +161,6 @@ class ZrGasAPI:
         """
         timestamp = str(int(time.time() * 1000))
         return f"{BASE_URL}{ENDPOINT_CAPTCHA_IMG}?flag={mobile}&tn={timestamp}"
-
-    async def fetch_captcha_image(self, mobile: str) -> str | None:
-        """Fetch the captcha image using the login session.
-
-        Uses the independent login session (with real CookieJar) so that
-        JSESSIONID cookie is preserved for subsequent send_sms_code and
-        login_with_sms calls.
-
-        Args:
-            mobile: Mobile phone number (11 digits).
-
-        Returns:
-            Base64-encoded image data URI string, or None on failure.
-        """
-        captcha_url = self.get_captcha_url(mobile)
-        headers = {
-            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Referer": "https://servicewechat.com/wx19c4e29f3ef6b4a0/91/page-frame.html",
-        }
-
-        try:
-            login_session = self._get_login_session()
-            async with login_session.get(
-                captcha_url, headers=headers
-            ) as resp:
-                resp.raise_for_status()
-                image_data = await resp.read()
-                # Debug: log cookies after captcha GET
-                cookies_after = ""
-                for cookie in login_session.cookie_jar:
-                    cookies_after += f"{cookie.key}={cookie.value}(path={cookie['path']}) "
-                _LOGGER.debug(
-                    "Captcha fetched: %d bytes, cookies=[%s]",
-                    len(image_data), cookies_after,
-                )
-                b64 = base64.b64encode(image_data).decode("ascii")
-                content_type = resp.content_type or "image/png"
-                return f"data:{content_type};base64,{b64}"
-        except Exception as err:
-            _LOGGER.warning("Failed to fetch captcha image: %s", err)
-            return None
 
     async def send_sms_code(self, mobile: str, captcha_code: str) -> None:
         """Send an SMS verification code to the given mobile number.
@@ -339,22 +295,16 @@ class ZrGasAPI:
         if str(status) not in ("0", "1") and "成功" not in message:
             raise ZrGasAuthError(f"登录失败: {message or '未知错误'}")
 
-        # Check if we actually got a token (some responses have status=0 but no token)
+        # Extract credentials from response
         login_data = result.get("data") or {}
         mas_token = login_data.get("masToken") or result.get("masToken") or ""
-        if not mas_token and str(status) not in ("0", "1"):
-            raise ZrGasAuthError(f"登录失败: {message or '未获取到token'}")
-
-        login_data = result.get("data") or {}
-
-        # Extract and store credentials (mirrors loginOK handler in JS)
-        mas_token = login_data.get("masToken") or result.get("masToken") or ""
-        sid = login_data.get("sid") or result.get("sid") or ""
-        user_info = login_data.get("data") or login_data
-        uid = str(user_info.get("id") or "")
 
         if not mas_token:
             raise ZrGasAuthError("Login succeeded but no masToken returned")
+
+        sid = login_data.get("sid") or result.get("sid") or ""
+        user_info = login_data.get("data") or login_data
+        uid = str(user_info.get("id") or "")
 
         # Store credentials for subsequent API calls
         self._access_token = mas_token
@@ -383,7 +333,7 @@ class ZrGasAPI:
         Returns:
             MD5 hex digest.
         """
-        raw = f"{param}{self._salt}{timestamp}"
+        raw = f"{param}{SIGN_SALT}{timestamp}"
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     def _get_timestamp(self) -> str:
@@ -502,7 +452,7 @@ class ZrGasAPI:
 
         try:
             result = await self._post(url, data)
-            return result.get("status") == 1
+            return str(result.get("status")) in ("0", "1")
         except Exception:
             _LOGGER.warning("Init request failed, continuing anyway")
             return False
