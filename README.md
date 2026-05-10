@@ -139,6 +139,23 @@ low_threshold: 50   # 余额预警阈值（默认 50 元）
 
 ## 更新日志
 
+### v0.10.2 — 移除冗余 state_class
+
+**代码清理：**
+- **移除**: `sensor.py` — monthly_usage/monthly_cost/owe_money 的 `state_class` 字段（无 state_class 时 HA 不参与长期统计，避免月度切换时的异常行为）
+
+### v0.10.1 — 代码审查修复（8 项修复）
+
+**Bug 修复：**
+- **修复**: `__init__.py` — `datetime.now()` → `dt_util.now()`（时区修正）
+- **修复**: `sensor.py` — balance 传感器 `state_class=TOTAL` → `MEASUREMENT`（余额非累计量）
+- **修复**: `sensor.py` — monthly_usage/cost `state_class=TOTAL` → `MEASUREMENT`（月切换避免负增量）
+- **修复**: `__init__.py` — `_calculate_annual_usage` 返回 4-tuple，消除 cycle_start 重复计算
+- **修复**: `config_flow.py` — OptionsFlow 阶梯参数验证（tier3>tier2、MM-DD格式）
+- **修复**: `api.py` — debug 日志遮蔽手机号和验证码
+- **修复**: `__init__.py` — bill 列表排序保证（sort by period, reverse）
+- **修复**: `const.py` — "customers" 提取为 `CONF_CUSTOMERS` 常量
+
 ### v0.10.0 — 阶梯气价 + 历史统计 + 费用反算
 
 **新功能：**
