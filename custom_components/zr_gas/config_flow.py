@@ -20,7 +20,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_get_clientsession, async_create_clientsession
 
 from .api import ZrGasAPI, ZrGasApiError, ZrGasAuthError, ZrGasSmsError
 from .const import (
@@ -34,8 +34,84 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
+import os
 
 _LOGGER = logging.getLogger(__name__)
+
+# Directory to store temporary captcha images served via HA's /local/ path
+_CAPTCHA_DIR = "www/zr_gas_captcha"
+
+
+def _get_captcha_local_url(hass: HomeAssistant, mobile: str) -> str:
+    """Get the /local/ URL for the captcha image.
+
+    The captcha is fetched by HA's aiohttp session (same as send_sms_code),
+    saved to www/zr_gas_captcha/, and served via HA's built-in static file server.
+
+    Returns:
+        Relative URL path like /local/zr_gas_captcha/18574472432.png
+    """
+    import time
+    ts = str(int(time.time() * 1000))
+    return f"/local/zr_gas_captcha/{mobile}.png?tn={ts}"
+
+
+async def _fetch_and_save_captcha(
+    hass: HomeAssistant, api: ZrGasAPI, mobile: str
+) -> str | None:
+    """Fetch captcha image via HA session and save to www/ for serving.
+
+    This ensures the SAME aiohttp session that will later call send_sms_code
+    also makes the captcha GET request, so JSESSIONID cookie is consistent.
+
+    Returns:
+        The /local/ URL for the saved image, or None on failure.
+    """
+    import aiofiles
+    import time
+
+    # Ensure www/zr_gas_captcha/ directory exists
+    captcha_dir = os.path.join(hass.config.config_dir, _CAPTCHA_DIR)
+    os.makedirs(captcha_dir, exist_ok=True)
+
+    # Fetch captcha image using the SAME session as send_sms_code
+    captcha_url = api.get_captcha_url(mobile)
+    headers = {
+        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": "https://servicewechat.com/wx19c4e29f3ef6b4a0/91/page-frame.html",
+    }
+
+    try:
+        # Use the login session (with real CookieJar) so that cookies
+        # from this GET request persist for send_sms_code / login_with_sms
+        login_session = api._get_login_session()
+        async with login_session.get(captcha_url, headers=headers) as resp:
+            resp.raise_for_status()
+            image_data = await resp.read()
+        # Debug: log cookies
+        cookie_info = ""
+        for c in login_session.cookie_jar:
+            cookie_info += f"{c.key}={c.value}(path={c['path']}) "
+        _LOGGER.debug(
+            "_fetch_and_save_captcha: %d bytes, cookies=[%s]",
+            len(image_data), cookie_info,
+        )
+    except Exception as err:
+        _LOGGER.warning("Failed to fetch captcha image: %s", err)
+        return None
+
+    # Save to www/zr_gas_captcha/{mobile}.png
+    filepath = os.path.join(captcha_dir, f"{mobile}.png")
+    try:
+        async with aiofiles.open(filepath, "wb") as f:
+            await f.write(image_data)
+    except Exception as err:
+        _LOGGER.warning("Failed to save captcha image: %s", err)
+        return None
+
+    ts = str(int(time.time() * 1000))
+    return f"/local/zr_gas_captcha/{mobile}.png?tn={ts}"
 
 
 class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -80,6 +156,16 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._mobile = mobile
                 session = async_get_clientsession(self.hass)
                 self._api = ZrGasAPI(session)
+                # Create an independent session with a REAL CookieJar for the
+                # login flow. HA's shared session uses DummyCookieJar which
+                # drops cookies — but the login flow (captcha → sendsms → login)
+                # requires JSESSIONID to persist across all three requests.
+                import aiohttp as _aiohttp
+                login_session = async_create_clientsession(
+                    self.hass,
+                    cookie_jar=_aiohttp.CookieJar(unsafe=True),
+                )
+                self._api.set_login_session(login_session)
                 return await self.async_step_captcha()
 
         return self.async_show_form(
@@ -129,9 +215,9 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 self._mobile = mobile
 
-                # Validate token by trying to get customer list
+                # Validate token via check_token
                 try:
-                    await self._api.init_request(self._api.user_id)
+                    await self._api.check_token()
                     # Token is valid, proceed to discovery
                     return await self.async_step_discover()
                 except ZrGasAuthError as err:
@@ -157,12 +243,12 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_captcha(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 2: Open captcha link, enter captcha code, send SMS.
+        """Step 2: View captcha image, enter captcha code, send SMS.
 
-        The captcha image URL is provided as a clickable link in the
-        description. The user clicks the link to open the image in a
-        new browser tab, reads the code, enters it, and submits to
-        trigger the SMS send.
+        The captcha image is fetched by HA's aiohttp session (same one
+        used for send_sms_code), saved to www/zr_gas_captcha/, and
+        served via HA's built-in /local/ static file path.
+        This ensures JSESSIONID cookie consistency.
 
         Args:
             user_input: User-provided form data, or None to show the form.
@@ -173,14 +259,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         description_placeholders: dict[str, str] = {}
 
-        # Build clickable link using link_left/link_right pattern (same as Xiaomi ha_xiaomi_home)
-        if self._api:
-            captcha_url = self._api.get_captcha_url(self._mobile)
-            description_placeholders["link_left"] = (
-                f'<a href="{captcha_url}" target="_blank">'
-            )
-            description_placeholders["link_right"] = "</a>"
-
+        # Handle form submission
         if user_input is not None:
             captcha_code = user_input.get("captcha_code", "").strip()
 
@@ -196,15 +275,36 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except ZrGasSmsError as err:
                     _LOGGER.warning("SMS send failed: %s", err)
                     errors["base"] = "sms_send_failed"
-                    # Refresh captcha URL on failure
-                    captcha_url = self._api.get_captcha_url(self._mobile)
-                    description_placeholders["link_left"] = (
-                        f'<a href="{captcha_url}" target="_blank">'
+                    # Refresh captcha on failure
+                    captcha_local_url = await _fetch_and_save_captcha(
+                        self.hass, self._api, self._mobile
                     )
-                    description_placeholders["link_right"] = "</a>"
+                    if captcha_local_url:
+                        description_placeholders["link_left"] = (
+                            f'<a href="{captcha_local_url}" target="_blank">'
+                        )
+                        description_placeholders["link_right"] = "</a>"
                 except Exception as err:
                     _LOGGER.error("Unexpected error sending SMS: %s", err)
                     errors["base"] = "connection_error"
+
+        # Fetch captcha and build link (only when no link yet,
+        # i.e. first display or after failed submission refresh)
+        if not description_placeholders.get("link_left") and self._api:
+            captcha_local_url = await _fetch_and_save_captcha(
+                self.hass, self._api, self._mobile
+            )
+            if captcha_local_url:
+                description_placeholders["link_left"] = (
+                    f'<a href="{captcha_local_url}" target="_blank">'
+                )
+                description_placeholders["link_right"] = "</a>"
+            else:
+                captcha_url = self._api.get_captcha_url(self._mobile)
+                description_placeholders["link_left"] = (
+                    f'<a href="{captcha_url}" target="_blank">'
+                )
+                description_placeholders["link_right"] = "</a>"
 
         return self.async_show_form(
             step_id="captcha",
@@ -282,6 +382,9 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             await self._api.init_request(self._api.user_id)
+        except Exception:
+            _LOGGER.warning("Init request failed, continuing to discovery")
+        try:
             customers = await self._api.get_bind_gas_cust_list(
                 self._api.user_id
             )
@@ -323,6 +426,10 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(user_id)
         self._abort_if_already_configured()
 
+        # Close the independent login session
+        if self._api:
+            await self._api.close_login_session()
+
         return self.async_create_entry(
             title=primary_name,
             data={
@@ -357,12 +464,20 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._mobile = entry_data.get(CONF_MOBILE, "")
         session = async_get_clientsession(self.hass)
         self._api = ZrGasAPI(session)
+        # Create an independent session with a REAL CookieJar for the
+        # login flow (same reason as async_step_user)
+        import aiohttp as _aiohttp
+        login_session = async_create_clientsession(
+            self.hass,
+            cookie_jar=_aiohttp.CookieJar(unsafe=True),
+        )
+        self._api.set_login_session(login_session)
         return await self.async_step_reauth_captcha()
 
     async def async_step_reauth_captcha(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Reauth step 1: Open captcha link, enter code, send SMS.
+        """Reauth step 1: View captcha image, enter code, send SMS.
 
         Args:
             user_input: User-provided form data, or None to show the form.
@@ -373,27 +488,22 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         description_placeholders: dict[str, str] = {}
 
-        if self._api:
-            captcha_url = self._api.get_captcha_url(self._mobile)
-            description_placeholders["link_left"] = (
-                f'<a href="{captcha_url}" target="_blank">'
-            )
-            description_placeholders["link_right"] = "</a>"
-            description_placeholders["mobile"] = (
-                f"{self._mobile[:3]}****{self._mobile[-4:]}"
-                if len(self._mobile) == 11
-                else self._mobile
-            )
-        else:
+        # Always set mobile placeholder
+        description_placeholders["mobile"] = (
+            f"{self._mobile[:3]}****{self._mobile[-4:]}"
+            if len(self._mobile) == 11
+            else self._mobile
+        )
+
+        if not self._api:
             errors["base"] = "connection_error"
 
-        if user_input is not None:
+        # Handle form submission first
+        if user_input is not None and self._api:
             captcha_code = user_input.get("captcha_code", "").strip()
 
             if not captcha_code or len(captcha_code) < 4:
                 errors["base"] = "captcha_required"
-            elif not self._api:
-                errors["base"] = "connection_error"
             else:
                 try:
                     await self._api.send_sms_code(self._mobile, captcha_code)
@@ -402,15 +512,35 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except ZrGasSmsError as err:
                     _LOGGER.warning("SMS send failed: %s", err)
                     errors["base"] = "sms_send_failed"
-                    # Refresh captcha URL on failure
-                    captcha_url = self._api.get_captcha_url(self._mobile)
-                    description_placeholders["link_left"] = (
-                        f'<a href="{captcha_url}" target="_blank">'
+                    # Refresh captcha on failure
+                    captcha_local_url = await _fetch_and_save_captcha(
+                        self.hass, self._api, self._mobile
                     )
-                    description_placeholders["link_right"] = "</a>"
+                    if captcha_local_url:
+                        description_placeholders["link_left"] = (
+                            f'<a href="{captcha_local_url}" target="_blank">'
+                        )
+                        description_placeholders["link_right"] = "</a>"
                 except Exception as err:
                     _LOGGER.error("Unexpected error sending SMS: %s", err)
                     errors["base"] = "connection_error"
+
+        # Fetch captcha and build link (first display or after failure refresh)
+        if not description_placeholders.get("link_left") and self._api:
+            captcha_local_url = await _fetch_and_save_captcha(
+                self.hass, self._api, self._mobile
+            )
+            if captcha_local_url:
+                description_placeholders["link_left"] = (
+                    f'<a href="{captcha_local_url}" target="_blank">'
+                )
+                description_placeholders["link_right"] = "</a>"
+            else:
+                captcha_url = self._api.get_captcha_url(self._mobile)
+                description_placeholders["link_left"] = (
+                    f'<a href="{captcha_url}" target="_blank">'
+                )
+                description_placeholders["link_right"] = "</a>"
 
         return self.async_show_form(
             step_id="reauth_captcha",
@@ -464,6 +594,9 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 CONF_X_MAS_APP_INFO: self._api.x_mas_app_info,
                             },
                         )
+                    # Close the independent login session
+                    if self._api:
+                        await self._api.close_login_session()
                     return self.async_abort(reason="reauth_successful")
 
                 except ZrGasAuthError as err:
