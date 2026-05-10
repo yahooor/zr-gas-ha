@@ -142,10 +142,6 @@ class ZrGasCard extends HTMLElement {
   getCardSize() {
     return 4;
   }
-
-  static getConfigElement() {
-    return document.createElement("zr-gas-card-editor");
-  }
 }
 
 customElements.define("zr-gas-card", ZrGasCard);

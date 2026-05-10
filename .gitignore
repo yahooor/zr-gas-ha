@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+.pytest_cache/
 reference/
 docs/
 zr_gas.zip
+*.zip

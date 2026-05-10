@@ -146,6 +146,9 @@
           }
         }
       }
+    },
+    "balance_low": {
+      "title": "Gas Balance Low"
     }
   }
 }

@@ -45,6 +45,7 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     CONF_USER_ID,
     CONF_X_MAS_APP_INFO,
+    DEFAULT_BALANCE_THRESHOLD,
     DEFAULT_BILL_YEARS,
     DEFAULT_TIER_1_PRICE,
     DEFAULT_TIER_2_PRICE,
@@ -228,6 +229,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     tier_config = _build_tier_config(entry.options)
     bill_years = entry.options.get(CONF_BILL_YEARS, DEFAULT_BILL_YEARS)
+    balance_threshold = entry.options.get(
+        CONF_BALANCE_THRESHOLD, DEFAULT_BALANCE_THRESHOLD
+    )
 
     # Use HA's shared aiohttp session (avoids resource leaks)
     session = async_get_clientsession(hass)
@@ -255,6 +259,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             update_interval_seconds=update_interval_seconds,
             tier_config=tier_config,
             bill_years=bill_years,
+            balance_threshold=balance_threshold,
         )
 
         # First refresh with error tolerance
@@ -341,6 +346,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
         update_interval_seconds: int,
         tier_config: TierConfig,
         bill_years: int = DEFAULT_BILL_YEARS,
+        balance_threshold: float = DEFAULT_BALANCE_THRESHOLD,
     ) -> None:
         """Initialize the coordinator.
 
@@ -352,6 +358,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             update_interval_seconds: Refresh interval in seconds.
             tier_config: Tiered gas pricing configuration.
             bill_years: Number of years to query bills.
+            balance_threshold: Balance alert threshold in CNY.
         """
         super().__init__(
             hass,
@@ -364,6 +371,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
         self.cust_name = cust_name
         self.tier_config = tier_config
         self.bill_years = bill_years
+        self.balance_threshold = balance_threshold
 
     async def _async_update_data(self) -> ZrGasDeviceData:
         """Fetch data from the ZR Gas API.
@@ -509,6 +517,27 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             ir.async_delete_issue(
                 self.hass, DOMAIN, f"token_expired_{self.cust_code}"
             )
+
+            # ── Balance threshold alert ────────────────────────
+            if detail.balance < self.balance_threshold:
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"balance_low_{self.cust_code}",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="balance_low",
+                    translation_placeholders={
+                        "cust_name": self.cust_name,
+                        "balance": f"{detail.balance:.2f}",
+                        "threshold": f"{self.balance_threshold:.2f}",
+                    },
+                )
+            else:
+                ir.async_delete_issue(
+                    self.hass, DOMAIN, f"balance_low_{self.cust_code}"
+                )
+
             _LOGGER.debug(
                 "Data updated for %s: balance=%.2f, usage=%.2f, cost=%.2f, "
                 "annual=%.2f, tier=%d",
