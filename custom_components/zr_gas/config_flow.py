@@ -13,12 +13,15 @@ Also includes:
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import callback
+from homeassistant.core import callback, HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession, async_create_clientsession
 
@@ -34,26 +37,11 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
-import os
 
 _LOGGER = logging.getLogger(__name__)
 
 # Directory to store temporary captcha images served via HA's /local/ path
 _CAPTCHA_DIR = "www/zr_gas_captcha"
-
-
-def _get_captcha_local_url(hass: HomeAssistant, mobile: str) -> str:
-    """Get the /local/ URL for the captcha image.
-
-    The captcha is fetched by HA's aiohttp session (same as send_sms_code),
-    saved to www/zr_gas_captcha/, and served via HA's built-in static file server.
-
-    Returns:
-        Relative URL path like /local/zr_gas_captcha/18574472432.png
-    """
-    import time
-    ts = str(int(time.time() * 1000))
-    return f"/local/zr_gas_captcha/{mobile}.png?tn={ts}"
 
 
 async def _fetch_and_save_captcha(
@@ -67,8 +55,6 @@ async def _fetch_and_save_captcha(
     Returns:
         The /local/ URL for the saved image, or None on failure.
     """
-    import time
-
     # Ensure www/zr_gas_captcha/ directory exists
     captcha_dir = os.path.join(hass.config.config_dir, _CAPTCHA_DIR)
     os.makedirs(captcha_dir, exist_ok=True)
@@ -159,13 +145,10 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 session = async_get_clientsession(self.hass)
                 self._api = ZrGasAPI(session)
                 # Create an independent session with a REAL CookieJar for the
-                # login flow. HA's shared session uses DummyCookieJar which
-                # drops cookies — but the login flow (captcha → sendsms → login)
-                # requires JSESSIONID to persist across all three requests.
-                import aiohttp as _aiohttp
+                # login flow (same reason as async_step_user)
                 login_session = async_create_clientsession(
                     self.hass,
-                    cookie_jar=_aiohttp.CookieJar(unsafe=True),
+                    cookie_jar=aiohttp.CookieJar(unsafe=True),
                 )
                 self._api.set_login_session(login_session)
                 return await self.async_step_captcha()
@@ -468,10 +451,9 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._api = ZrGasAPI(session)
         # Create an independent session with a REAL CookieJar for the
         # login flow (same reason as async_step_user)
-        import aiohttp as _aiohttp
         login_session = async_create_clientsession(
             self.hass,
-            cookie_jar=_aiohttp.CookieJar(unsafe=True),
+            cookie_jar=aiohttp.CookieJar(unsafe=True),
         )
         self._api.set_login_session(login_session)
         return await self.async_step_reauth_captcha()
