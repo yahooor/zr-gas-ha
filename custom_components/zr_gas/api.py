@@ -20,6 +20,7 @@ Login flow (from pages-login-login.js):
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import time
@@ -97,6 +98,25 @@ class ZrGasAPI:
         self._user_id = user_id
         self._x_mas_app_info = x_mas_app_info
         self._salt = SIGN_SALT
+        # Independent session with a REAL CookieJar for the login flow.
+        # HA's shared session (async_get_clientsession) uses DummyCookieJar
+        # which drops cookies. The login flow requires cookies to persist
+        # across GET captcha → POST sendsms → POST login, so the caller
+        # should use ``set_login_session()`` to inject a session created
+        # via ``async_create_clientsession(hass, cookie_jar=aiohttp.CookieJar(unsafe=True))``.
+        self._login_session: aiohttp.ClientSession | None = None
+
+    def set_login_session(self, session: aiohttp.ClientSession) -> None:
+        """Set an independent session with a real CookieJar for login flow.
+
+        Must be called before ``fetch_captcha_image()`` / ``send_sms_code()``
+        / ``login_with_sms()`` so that JSESSIONID and other cookies persist
+        across all three requests.
+
+        Args:
+            session: An ``aiohttp.ClientSession`` with a real ``CookieJar``.
+        """
+        self._login_session = session
 
     @property
     def access_token(self) -> str:
@@ -113,6 +133,22 @@ class ZrGasAPI:
         """Return the current x-mas-app-info header value."""
         return self._x_mas_app_info
 
+    def _get_login_session(self) -> aiohttp.ClientSession:
+        """Get the session to use for login flow requests.
+
+        Returns the independent login session (with real CookieJar) if set,
+        otherwise falls back to HA's shared session.
+        """
+        if self._login_session is not None and not self._login_session.closed:
+            return self._login_session
+        return self._session
+
+    async def close_login_session(self) -> None:
+        """Close the independent login session after login is complete."""
+        if self._login_session and not self._login_session.closed:
+            await self._login_session.close()
+            self._login_session = None
+
     def get_captcha_url(self, mobile: str) -> str:
         """Get the URL for the captcha image associated with a mobile number.
 
@@ -127,6 +163,48 @@ class ZrGasAPI:
         """
         timestamp = str(int(time.time() * 1000))
         return f"{BASE_URL}{ENDPOINT_CAPTCHA_IMG}?flag={mobile}&tn={timestamp}"
+
+    async def fetch_captcha_image(self, mobile: str) -> str | None:
+        """Fetch the captcha image using the login session.
+
+        Uses the independent login session (with real CookieJar) so that
+        JSESSIONID cookie is preserved for subsequent send_sms_code and
+        login_with_sms calls.
+
+        Args:
+            mobile: Mobile phone number (11 digits).
+
+        Returns:
+            Base64-encoded image data URI string, or None on failure.
+        """
+        captcha_url = self.get_captcha_url(mobile)
+        headers = {
+            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": "https://servicewechat.com/wx19c4e29f3ef6b4a0/91/page-frame.html",
+        }
+
+        try:
+            login_session = self._get_login_session()
+            async with login_session.get(
+                captcha_url, headers=headers
+            ) as resp:
+                resp.raise_for_status()
+                image_data = await resp.read()
+                # Debug: log cookies after captcha GET
+                cookies_after = ""
+                for cookie in login_session.cookie_jar:
+                    cookies_after += f"{cookie.key}={cookie.value}(path={cookie['path']}) "
+                _LOGGER.debug(
+                    "Captcha fetched: %d bytes, cookies=[%s]",
+                    len(image_data), cookies_after,
+                )
+                b64 = base64.b64encode(image_data).decode("ascii")
+                content_type = resp.content_type or "image/png"
+                return f"data:{content_type};base64,{b64}"
+        except Exception as err:
+            _LOGGER.warning("Failed to fetch captcha image: %s", err)
+            return None
 
     async def send_sms_code(self, mobile: str, captcha_code: str) -> None:
         """Send an SMS verification code to the given mobile number.
@@ -153,14 +231,41 @@ class ZrGasAPI:
         }
 
         try:
-            result = await self._post_raw(url, data)
+            # Use login session (with real CookieJar) for cookie consistency
+            login_session = self._get_login_session()
+
+            # Debug: log session cookies
+            cookie_str = ""
+            for cookie in login_session.cookie_jar:
+                cookie_str += f"{cookie.key}={cookie.value}(path={cookie['path']}) "
+            _LOGGER.debug(
+                "SMS send: mobile=%s, code=%s, session_cookies=[%s]",
+                mobile, captcha_code, cookie_str,
+            )
+
+            request_headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }
+            async with login_session.post(
+                url, headers=request_headers, data=data
+            ) as resp:
+                resp.raise_for_status()
+                result = await resp.json()
         except Exception as err:
             raise ZrGasSmsError(f"Failed to send SMS code: {err}") from err
 
         status = result.get("status")
-        if status != 1:
-            message = result.get("message", "未知错误")
-            raise ZrGasSmsError(f"发送验证码失败: {message}")
+        message = result.get("message", "")
+        # API status codes vary by endpoint:
+        #   status=1 → success, status=0 → may also be success ("操作成功")
+        #   status=2 → verification code expired
+        #   status=-1 → wrong captcha / input error
+        if status == 2:
+            raise ZrGasSmsError(f"发送验证码失败: 验证码已过期，请重新获取")
+        if status not in (0, 1) and "成功" not in message:
+            raise ZrGasSmsError(f"发送验证码失败: {message or '未知错误'}")
 
         _LOGGER.info("SMS code sent successfully to %s****%s", mobile[:3], mobile[-4:])
 
@@ -201,14 +306,42 @@ class ZrGasAPI:
         }
 
         try:
-            result = await self._post_raw(url, data)
+            login_session = self._get_login_session()
+            login_headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }
+            async with login_session.post(
+                url, headers=login_headers, data=data
+            ) as resp:
+                resp.raise_for_status()
+                result = await resp.json()
         except Exception as err:
             raise ZrGasAuthError(f"SMS login failed: {err}") from err
 
         status = result.get("status")
-        if status != 1:
-            message = result.get("message", "未知错误")
-            raise ZrGasAuthError(f"登录失败: {message}")
+        message = result.get("message", "")
+        _LOGGER.debug("Login response: status=%s, message=%s, data_keys=%s",
+                      status, message, list((result.get("data") or {}).keys()))
+
+        # API status codes for login:
+        #   status=1 → success
+        #   status=0 → may also be success (some endpoints use 0 for OK)
+        #   status=2 → verification code expired ("请重新获取验证码")
+        #   status=-1 → wrong verification code ("验证码输入不正确")
+        if status == 2:
+            raise ZrGasAuthError(f"登录失败: 验证码已过期，请重新获取")
+        if status == -1:
+            raise ZrGasAuthError(f"登录失败: {message or '验证码输入不正确'}")
+        if status not in (0, 1) and "成功" not in message:
+            raise ZrGasAuthError(f"登录失败: {message or '未知错误'}")
+
+        # Check if we actually got a token (some responses have status=0 but no token)
+        login_data = result.get("data") or {}
+        mas_token = login_data.get("masToken") or result.get("masToken") or ""
+        if not mas_token and status not in (0, 1):
+            raise ZrGasAuthError(f"登录失败: {message or '未获取到token'}")
 
         login_data = result.get("data") or {}
 
@@ -399,7 +532,7 @@ class ZrGasAPI:
         try:
             result = await self._post(url, data)
             return result.get("status") == 1
-        except ZrGasApiError:
+        except Exception:
             _LOGGER.warning("Init request failed, continuing anyway")
             return False
 
