@@ -193,6 +193,29 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
         }
 
     @property
+    def device_info(self) -> dict[str, Any]:
+        """Return dynamic device info with live data from coordinator."""
+        info = {
+            "identifiers": {(DOMAIN, self._cust_code)},
+            "name": f"中燃燃气 {self._cust_code[-4:]}",
+            "manufacturer": "中燃在线",
+            "model": "在线账户",
+        }
+        if self.coordinator.data is not None:
+            data = self.coordinator.data
+            if data.comp_name:
+                info["manufacturer"] = data.comp_name
+            if data.meter_form_name:
+                info["model"] = data.meter_form_name
+            if data.cust_address:
+                info["name"] = f"中燃燃气 {data.cust_address[:20]}"
+            if data.meter_no:
+                info["sw_version"] = f"表号: {data.meter_no}"
+            if data.card_no:
+                info["hw_version"] = f"卡号: {data.card_no}"
+        return info
+
+    @property
     def native_value(self) -> float | str | None:
         """Return the sensor value extracted by value_fn."""
         if self.coordinator.data is None:
