@@ -8,6 +8,11 @@ Each bound gas customer account gets its own Device grouping:
 - Balance sensor: Current account balance (CNY)
 - Monthly usage sensor: Current month gas usage (m³)
 - Monthly cost sensor: Current month cost (CNY)
+- Owe money sensor: Outstanding debt (CNY)
+- Meter reading sensor: Last meter reading
+- Gas volume balance sensor: Remaining gas volume
+- Purchase count sensor: Number of gas purchases
+- Last reading date sensor: Date of last meter reading
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CURRENCY_YUAN, UnitOfVolume
+from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -41,43 +46,52 @@ class ZrGasSensorEntityDescription(SensorEntityDescription):
     callback to extract the sensor value from coordinator data.
     """
 
-    value_fn: Callable[[ZrGasDeviceData], float | None]
+    value_fn: Callable[[ZrGasDeviceData], float | str | None]
     attributes_fn: Callable[[ZrGasDeviceData], dict[str, Any]] | None = None
 
 
+# Shared device attributes for all sensors
+def _device_attributes(data: ZrGasDeviceData) -> dict[str, Any]:
+    """Return common device attributes shared across all sensors."""
+    return {
+        "cust_code": data.cust_code,
+        "cust_name": data.cust_name,
+        "cust_address": data.cust_address,
+        "comp_name": data.comp_name,
+        "meter_no": data.meter_no,
+        "meter_form_name": data.meter_form_name,
+        "card_no": data.card_no,
+        "fee": data.fee,
+        "cust_status": data.cust_status,
+    }
+
+
 # ── Sensor descriptions ──────────────────────────────────────────────
-# Declarative sensor definitions. To add a new sensor, just add an entry.
 
 SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
     ZrGasSensorEntityDescription(
         key="balance",
         translation_key="balance",
         device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=CURRENCY_YUAN,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement="CNY",
         icon="mdi:cash",
         suggested_display_precision=2,
         value_fn=lambda data: data.balance,
-        attributes_fn=lambda data: {
-            "cust_code": data.cust_code,
-            "cust_name": data.cust_name,
-            "cust_address": data.cust_address,
-        },
+        attributes_fn=lambda data: _device_attributes(data),
     ),
     ZrGasSensorEntityDescription(
         key="monthly_usage",
         translation_key="monthly_usage",
         device_class=SensorDeviceClass.GAS,
-        state_class=SensorStateClass.MEASUREMENT,
+        state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
         icon="mdi:fire",
         suggested_display_precision=2,
         value_fn=lambda data: data.monthly_usage,
         attributes_fn=lambda data: {
-            "cust_code": data.cust_code,
+            **_device_attributes(data),
             "period": data.period,
-            "usage_volume": data.monthly_usage,
-            "usage_amount": data.monthly_cost,
             "unit_price": data.unit_price,
         },
     ),
@@ -85,26 +99,76 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         key="monthly_cost",
         translation_key="monthly_cost",
         device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=CURRENCY_YUAN,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement="CNY",
         icon="mdi:currency-cny",
         suggested_display_precision=2,
         value_fn=lambda data: data.monthly_cost,
         attributes_fn=lambda data: {
-            "cust_code": data.cust_code,
+            **_device_attributes(data),
             "period": data.period,
+        },
+    ),
+    ZrGasSensorEntityDescription(
+        key="owe_money",
+        translation_key="owe_money",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement="CNY",
+        icon="mdi:alert-circle-outline",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.owe_money,
+        attributes_fn=lambda data: _device_attributes(data),
+    ),
+    ZrGasSensorEntityDescription(
+        key="last_record",
+        translation_key="last_record",
+        device_class=SensorDeviceClass.GAS,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        icon="mdi:gauge",
+        suggested_display_precision=0,
+        value_fn=lambda data: data.last_record,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "last_record_time": data.last_record_time,
+        },
+    ),
+    ZrGasSensorEntityDescription(
+        key="qty_meter_balance",
+        translation_key="qty_meter_balance",
+        device_class=SensorDeviceClass.GAS,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        icon="mdi:gas-cylinder",
+        suggested_display_precision=0,
+        value_fn=lambda data: data.qty_meter_balance,
+        attributes_fn=lambda data: _device_attributes(data),
+    ),
+    ZrGasSensorEntityDescription(
+        key="purch_times",
+        translation_key="purch_times",
+        state_class=SensorStateClass.TOTAL,
+        icon="mdi:counter",
+        value_fn=lambda data: data.purch_times,
+        attributes_fn=lambda data: _device_attributes(data),
+    ),
+    ZrGasSensorEntityDescription(
+        key="last_record_time",
+        translation_key="last_record_time",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        icon="mdi:calendar-clock",
+        value_fn=lambda data: data.last_record_time or None,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "last_record": data.last_record,
         },
     ),
 )
 
 
 class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEntity):
-    """Single sensor entity class for all 中燃在线 sensors.
-
-    Uses entity_description (SensorEntityDescription pattern) to
-    declaratively define each sensor's behavior. This eliminates the
-    need for multiple sensor subclasses.
-    """
+    """Single sensor entity class for all 中燃在线 sensors."""
 
     entity_description: ZrGasSensorEntityDescription
     _attr_has_entity_name = True
@@ -116,14 +180,7 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
         cust_code: str,
         cust_code_short: str,
     ) -> None:
-        """Initialize the sensor entity.
-
-        Args:
-            coordinator: Data update coordinator for this customer.
-            description: Entity description defining sensor behavior.
-            cust_code: Full customer code.
-            cust_code_short: Last 4 digits for display.
-        """
+        """Initialize the sensor entity."""
         super().__init__(coordinator)
         self.entity_description = description
         self._cust_code = cust_code
@@ -136,7 +193,7 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
         }
 
     @property
-    def native_value(self) -> float | None:
+    def native_value(self) -> float | str | None:
         """Return the sensor value extracted by value_fn."""
         if self.coordinator.data is None:
             return None
@@ -157,16 +214,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the 中燃在线 sensor platform.
-
-    Creates sensor entities for each bound gas customer account,
-    using the SensorEntityDescription pattern.
-
-    Args:
-        hass: Home Assistant instance.
-        entry: Config entry with account and coordinator data.
-        async_add_entities: Callback to register new entities.
-    """
+    """Set up the 中燃在线 sensor platform."""
     entry_data = hass.data[DOMAIN][entry.entry_id]
     coordinators: dict[str, ZrGasDataUpdateCoordinator] = entry_data.get(
         "coordinators", {}
