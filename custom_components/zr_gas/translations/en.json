@@ -59,10 +59,17 @@
     "step": {
       "init": {
         "title": "ZR Gas Options",
-        "description": "Adjust data refresh and balance alert settings",
+        "description": "Adjust data refresh, balance alert, bill query range and tiered pricing settings",
         "data": {
           "update_interval": "Refresh Interval (seconds)",
-          "balance_threshold": "Balance Alert Threshold (CNY)"
+          "balance_threshold": "Balance Alert Threshold (CNY)",
+          "bill_query_years": "Bill Query Years",
+          "yearly_step_2_start_volume": "Tier 2 Start Volume (m\u00b3)",
+          "yearly_step_3_start_volume": "Tier 3 Start Volume (m\u00b3)",
+          "year_step_1_price": "Tier 1 Price (CNY/m\u00b3)",
+          "year_step_2_price": "Tier 2 Price (CNY/m\u00b3)",
+          "year_step_3_price": "Tier 3 Price (CNY/m\u00b3)",
+          "tier_cycle_start_md": "Tier Cycle Start (MM-DD)"
         }
       }
     }
@@ -102,6 +109,24 @@
       },
       "monthly_cost": {
         "name": "Monthly Cost"
+      },
+      "owe_money": {
+        "name": "Owe Money"
+      },
+      "last_record": {
+        "name": "Last Record"
+      },
+      "qty_meter_balance": {
+        "name": "Gas Volume Balance"
+      },
+      "purch_times": {
+        "name": "Purchase Count"
+      },
+      "last_record_time": {
+        "name": "Last Record Time"
+      },
+      "annual_usage": {
+        "name": "Annual Usage"
       }
     },
     "button": {

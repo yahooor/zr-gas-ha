@@ -13,6 +13,7 @@ Each bound gas customer account gets its own Device grouping:
 - Gas volume balance sensor: Remaining gas volume
 - Purchase count sensor: Number of gas purchases
 - Last reading date sensor: Date of last meter reading
+- Annual usage sensor: Yearly accumulated gas usage with tier info (m³)
 """
 
 from __future__ import annotations
@@ -90,6 +91,22 @@ def _device_attributes(data: ZrGasDeviceData) -> dict[str, Any]:
         "card_no": data.card_no,
         "fee": data.fee,
         "cust_status": data.cust_status,
+    }
+
+
+def _stats_attributes(data: ZrGasDeviceData) -> dict[str, Any]:
+    """Return monthly/yearly statistics attributes."""
+    monthly_list = [
+        {"month": ms.month, "gas_num": round(ms.gas_num, 2), "gas_cost": round(ms.gas_cost, 2)}
+        for ms in data.monthly_stats
+    ]
+    yearly_list = [
+        {"year": ys.year, "gas_num": round(ys.gas_num, 2), "gas_cost": round(ys.gas_cost, 2)}
+        for ys in data.yearly_stats
+    ]
+    return {
+        "monthly_stats": monthly_list,
+        "yearly_stats": yearly_list,
     }
 
 
@@ -189,6 +206,24 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         attributes_fn=lambda data: {
             **_device_attributes(data),
             "last_record": data.last_record,
+        },
+    ),
+    # ── 新增：年度累计用气量传感器 ────────────────────────────
+    ZrGasSensorEntityDescription(
+        key="annual_usage",
+        translation_key="annual_usage",
+        device_class=SensorDeviceClass.GAS,
+        state_class=SensorStateClass.TOTAL,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        icon="mdi:chart-line",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.annual_usage,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            **_stats_attributes(data),
+            "current_tier": data.current_tier,
+            "current_tier_price": data.current_tier_price,
+            "tier_cycle_start": data.tier_cycle_start,
         },
     ),
 )

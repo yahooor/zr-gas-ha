@@ -59,10 +59,17 @@
     "step": {
       "init": {
         "title": "中燃在线选项",
-        "description": "调整数据刷新和余额预警设置",
+        "description": "调整数据刷新、余额预警、账单查询范围和阶梯气价设置",
         "data": {
           "update_interval": "刷新间隔（秒）",
-          "balance_threshold": "余额预警阈值（元）"
+          "balance_threshold": "余额预警阈值（元）",
+          "bill_query_years": "账单查询年数",
+          "yearly_step_2_start_volume": "第二档起始量（m³）",
+          "yearly_step_3_start_volume": "第三档起始量（m³）",
+          "year_step_1_price": "第一档单价（元/m³）",
+          "year_step_2_price": "第二档单价（元/m³）",
+          "year_step_3_price": "第三档单价（元/m³）",
+          "tier_cycle_start_md": "阶梯周期起始月日（MM-DD）"
         }
       }
     }
@@ -117,6 +124,9 @@
       },
       "last_record_time": {
         "name": "最后抄表日期"
+      },
+      "annual_usage": {
+        "name": "年度累计用量"
       }
     },
     "button": {

@@ -29,11 +29,25 @@ from .api import ZrGasAPI, ZrGasApiError, ZrGasAuthError, ZrGasSmsError
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_BALANCE_THRESHOLD,
+    CONF_BILL_YEARS,
     CONF_MOBILE,
+    CONF_TIER_1_PRICE,
+    CONF_TIER_2_PRICE,
+    CONF_TIER_2_START,
+    CONF_TIER_3_PRICE,
+    CONF_TIER_3_START,
+    CONF_TIER_CYCLE_START,
     CONF_UPDATE_INTERVAL,
     CONF_USER_ID,
     CONF_X_MAS_APP_INFO,
     DEFAULT_BALANCE_THRESHOLD,
+    DEFAULT_BILL_YEARS,
+    DEFAULT_TIER_1_PRICE,
+    DEFAULT_TIER_2_PRICE,
+    DEFAULT_TIER_2_START,
+    DEFAULT_TIER_3_PRICE,
+    DEFAULT_TIER_3_START,
+    DEFAULT_TIER_CYCLE_START,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
@@ -617,6 +631,8 @@ class ZrGasOptionsFlow(config_entries.OptionsFlow):
     Allows users to update:
     - Data refresh interval (seconds)
     - Balance alert threshold (CNY)
+    - Bill query range (years)
+    - Tiered gas pricing parameters
     """
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
@@ -653,6 +669,48 @@ class ZrGasOptionsFlow(config_entries.OptionsFlow):
                             CONF_BALANCE_THRESHOLD, DEFAULT_BALANCE_THRESHOLD
                         ),
                     ): vol.All(float, vol.Range(min=0)),
+                    vol.Optional(
+                        CONF_BILL_YEARS,
+                        default=self._config_entry.options.get(
+                            CONF_BILL_YEARS, DEFAULT_BILL_YEARS
+                        ),
+                    ): vol.All(int, vol.Range(min=1, max=5)),
+                    vol.Optional(
+                        CONF_TIER_2_START,
+                        default=self._config_entry.options.get(
+                            CONF_TIER_2_START, DEFAULT_TIER_2_START
+                        ),
+                    ): vol.All(int, vol.Range(min=1)),
+                    vol.Optional(
+                        CONF_TIER_3_START,
+                        default=self._config_entry.options.get(
+                            CONF_TIER_3_START, DEFAULT_TIER_3_START
+                        ),
+                    ): vol.All(int, vol.Range(min=1)),
+                    vol.Optional(
+                        CONF_TIER_1_PRICE,
+                        default=self._config_entry.options.get(
+                            CONF_TIER_1_PRICE, DEFAULT_TIER_1_PRICE
+                        ),
+                    ): vol.All(float, vol.Range(min=0)),
+                    vol.Optional(
+                        CONF_TIER_2_PRICE,
+                        default=self._config_entry.options.get(
+                            CONF_TIER_2_PRICE, DEFAULT_TIER_2_PRICE
+                        ),
+                    ): vol.All(float, vol.Range(min=0)),
+                    vol.Optional(
+                        CONF_TIER_3_PRICE,
+                        default=self._config_entry.options.get(
+                            CONF_TIER_3_PRICE, DEFAULT_TIER_3_PRICE
+                        ),
+                    ): vol.All(float, vol.Range(min=0)),
+                    vol.Optional(
+                        CONF_TIER_CYCLE_START,
+                        default=self._config_entry.options.get(
+                            CONF_TIER_CYCLE_START, DEFAULT_TIER_CYCLE_START
+                        ),
+                    ): str,
                 }
             ),
         )
