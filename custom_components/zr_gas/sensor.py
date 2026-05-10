@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -35,11 +35,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import homeassistant.util.dt as dt_util
 
+from . import ZrGasDataUpdateCoordinator
 from .const import DOMAIN
 from .models import ZrGasDeviceData
-
-if TYPE_CHECKING:
-    from . import ZrGasDataUpdateCoordinator
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:

@@ -8,7 +8,6 @@ HA UI without waiting for the scheduled refresh.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -16,10 +15,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import ZrGasDataUpdateCoordinator
 from .const import DOMAIN
-
-if TYPE_CHECKING:
-    from . import ZrGasDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
