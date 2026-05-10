@@ -426,7 +426,7 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # Deduplicate by user_id (mobile number)
         await self.async_set_unique_id(user_id)
-        self._abort_if_already_configured()
+        self._abort_if_unique_id_configured()
 
         # Close the independent login session
         if self._api:
