@@ -102,6 +102,21 @@
       },
       "monthly_cost": {
         "name": "月费用"
+      },
+      "owe_money": {
+        "name": "欠费金额"
+      },
+      "last_record": {
+        "name": "表读数"
+      },
+      "qty_meter_balance": {
+        "name": "气量余额"
+      },
+      "purch_times": {
+        "name": "购气次数"
+      },
+      "last_record_time": {
+        "name": "最后抄表日期"
       }
     },
     "button": {
