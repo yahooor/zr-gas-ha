@@ -27,6 +27,17 @@ class ZrGasCustomerDetail:
     cust_name: str
     cust_address: str
     balance: float
+    owe_money: float = 0.0
+    last_record: float = 0.0
+    qty_meter_balance: float = 0.0
+    purch_times: int = 0
+    last_record_time: str = ""
+    meter_no: str = ""
+    meter_form_name: str = ""
+    card_no: str = ""
+    comp_name: str = ""
+    cust_status: str = ""
+    fee: str = ""
 
 
 @dataclass
@@ -57,3 +68,14 @@ class ZrGasDeviceData:
     monthly_cost: float  # 当月费用 (CNY)
     period: str  # 当前账期 YYYYMM
     unit_price: float  # 当月单价 (CNY/m³)
+    owe_money: float = 0.0
+    last_record: float = 0.0
+    qty_meter_balance: float = 0.0
+    purch_times: int = 0
+    last_record_time: str = ""
+    meter_no: str = ""
+    meter_form_name: str = ""
+    card_no: str = ""
+    comp_name: str = ""
+    cust_status: str = ""
+    fee: str = ""
