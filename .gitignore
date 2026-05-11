@@ -1,9 +1,30 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.DS_Store
+*.egg-info/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# HA
 .pytest_cache/
 reference/
+.hass_build/
+
+# Docs
 docs/
-zr_gas.zip
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
 *.zip
