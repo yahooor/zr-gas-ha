@@ -139,6 +139,17 @@ low_threshold: 50   # 余额预警阈值（默认 50 元）
 
 ## 更新日志
 
+### v0.12.2 — 修复 Zip 文件结构（HACS 安装失败根因）
+
+**Zip 打包修复：**
+- **修复**: `release.yml` — 重写打包脚本，使用 `mkdir + cp + zip` 方法（替代有 bug 的 Python 一行代码）
+- **结果**: Zip 文件现在包含正确的 `custom_components/zr_gas/` 目录结构
+- **原因**: HACS 期望 zip 解压后包含 `custom_components/` 前缀，旧脚本生成的文件直接在根目录
+
+**验证通过：**
+- ✅ `zr_gas.zip` 内部结构：`custom_components/zr_gas/__init__.py` 等
+- ✅ HACS 可以正确识别和安装集成
+
 ### v0.12.1 — 修复 HACS 文件名配置
 
 **HACS 修复：**

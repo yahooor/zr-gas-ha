@@ -22,7 +22,11 @@ jobs:
 
       - name: Build zr_gas.zip
         run: |
-          python -c "import zipfile, os; zf = zipfile.ZipFile('zr_gas.zip', 'w', zipfile.ZIP_DEFLATED); [zf.write(os.path.join(r, f), os.path.relpath(os.path.join(r, f), 'custom_components/')) for r, _, fs in os.walk('custom_components/') for f in fs if not f.endswith('.pyc') and '__pycache__' not in r]; zf.close(); print('✅ Created zr_gas.zip')"
+          mkdir -p build/custom_components
+          cp -r custom_components/zr_gas build/custom_components/
+          cd build && zip -r ../zr_gas.zip custom_components/
+          rm -rf build
+          echo "✅ Created zr_gas.zip with correct structure"
 
       - name: Extract version from manifest.json
         id: version
