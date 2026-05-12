@@ -138,7 +138,14 @@ low_threshold: 50   # 余额预警阈值（默认 50 元）
 - **最低 HA 版本**: 2024.1.0
 
 ## 更新日志
-n### v0.11.0 — HACS 规范修复
+
+### v0.12.1 — 修复 HACS 文件名配置
+
+**HACS 修复：**
+- **修复**: `hacs.json` — 删除错误的 `filename: "zr_gas_0102.zip"` 字段，让 HACS 自动匹配 Release 中的 `zr_gas.zip`
+- **原因**: 固定文件名与实际 CI/CD 生成的文件名不匹配，导致 HACS 下载失败
+
+### v0.11.0 — HACS 规范修复
 
 **HACS 规范修复：**
 - **修复**: `manifest.json` — 添加 `integration_type: "device"` 和 `loggers`
