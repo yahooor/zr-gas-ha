@@ -27,7 +27,7 @@ jobs:
       - name: Extract version from manifest.json
         id: version
         run: |
-          VERSION=$(grep '"version"' custom_components/zr_gas/manifest.json | sed 's/.*"version": "$.*$".*/\1/')
+          VERSION=$(grep '"version"' custom_components/zr_gas/manifest.json | sed -E 's/.*"version": "(.*)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
