@@ -138,6 +138,19 @@ low_threshold: 50   # 余额预警阈值（默认 50 元）
 - **最低 HA 版本**: 2024.1.0
 
 ## 更新日志
+n### v0.11.0 — HACS 规范修复
+
+**HACS 规范修复：**
+- **修复**: `manifest.json` — 添加 `integration_type: "device"` 和 `loggers`
+- **修复**: `hacs.json` — 移除 `iot_class`（HACS 1.34+ 弃用），`filename` 改为版本无关命名 `zr_gas.zip`
+- **修复**: `.gitignore` — 完善规则，移除冗余的 `zr_gas.zip` 行
+- **修复**: 删除根目录三个 zip 文件（应通过 Release Assets 分发）
+
+**仓库规范化：**
+- 符合 HACS 规范（manifest.json + hacs.json）
+- GitHub Release 自动分发 zip 文件
+- 仓库结构清晰，无冗余文件
+
 
 ### v0.10.2 — 移除冗余 state_class + HACS 配置优化
 

@@ -3,4 +3,6 @@
 
 custom_components:
   zr_gas:
-    quality_scale: custom
+    quality_scale: bronze
+    # Achieved: Bronze
+    # Next target: Silver (add error recovery, reauth, troubleshooting docs)
