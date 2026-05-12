@@ -1,9 +1,15 @@
 {
   "entity": {
     "sensor": {
-      "balance": "mdi:cash",
-      "monthly_usage": "mdi:fire",
-      "monthly_cost": "mdi:currency-cny"
+      "balance": "mdi:wallet",
+      "monthly_usage": "mdi:fire-circle",
+      "monthly_cost": "mdi:currency-cny",
+      "owe_money": "mdi:alert-circle",
+      "last_record": "mdi:gauge",
+      "qty_meter_balance": "mdi:gas-cylinder",
+      "purch_times": "mdi:counter",
+      "last_record_time": "mdi:clock-outline",
+      "annual_usage": "mdi:chart-line"
     }
   }
 }

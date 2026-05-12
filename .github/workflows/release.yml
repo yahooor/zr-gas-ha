@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build zr_gas.zip
+        run: |
+          python -c "import zipfile, os; zf = zipfile.ZipFile('zr_gas.zip', 'w', zipfile.ZIP_DEFLATED); [zf.write(os.path.join(r, f), os.path.relpath(os.path.join(r, f), 'custom_components/')) for r, _, fs in os.walk('custom_components/') for f in fs if not f.endswith('.pyc') and '__pycache__' not in r]; zf.close(); print('✅ Created zr_gas.zip')"
+
+      - name: Extract version from manifest.json
+        id: version
+        run: |
+          VERSION=$(grep '"version"' custom_components/zr_gas/manifest.json | sed 's/.*"version": "$.*$".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          # Extract release notes from README.md
+          NOTES=$(awk '/^### v${{ steps.version.outputs.version }}/,/^### v/' README.md | head -n -2 | tail -n +2)
+          if [ -z "$NOTES" ]; then
+            NOTES="Release v${{ steps.version.outputs.version }}"
+          fi
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          body: ${{ steps.release_notes.outputs.notes }}
+          files: zr_gas.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
