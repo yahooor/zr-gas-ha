@@ -71,7 +71,7 @@ Home Assistant 自定义集成，从**中燃在线**平台（`zrds.95007.com`）
 | 余额预警阈值 | 50 元 | 低于触发提醒 |
 | 账单查询年数 | 2 | 1-5 年 |
 | 第二/三档起始量 | 400 / 1680 m³ | 阶梯气价 |
-| 三档单价 | 2.99 / 3.44 / 4.34 元 | 张家界民用默认值 |
+| 三档单价 | 2.99 / 3.44 / 4.34 元 | 示例默认值（请按当地资费调整） |
 | 阶梯周期起始 | 01-01 | MM-DD |
 
 ## 传感器
@@ -94,7 +94,7 @@ Home Assistant 自定义集成，从**中燃在线**平台（`zrds.95007.com`）
 
 ```yaml
 type: custom:zr-gas-card
-entity: sensor.zhong_ran_ran_qi_8854_balance
+entity: sensor.zhong_ran_ran_qi_XXXX_balance
 # 可选:
 # title: 我的燃气
 # low_threshold: 50      # 余额预警线
