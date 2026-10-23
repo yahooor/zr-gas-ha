@@ -177,7 +177,7 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         native_unit_of_measurement="CNY",
         icon="mdi:gift-outline",
         suggested_display_precision=2,
-        value_fn=lambda data: data.award_money or None,
+        value_fn=lambda data: data.award_money,
         attributes_fn=lambda data: _device_attributes(data),
     ),
     ZrGasSensorEntityDescription(

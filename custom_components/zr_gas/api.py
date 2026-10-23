@@ -214,11 +214,17 @@ class ZrGasBaseApi:
         payments = [
             ZrGasPayment(
                 pay_time=str(
-                    item.get("payTime") or item.get("createTime") or item.get("time") or ""
+                    item.get("timeope")
+                    or item.get("payTime")
+                    or item.get("createTime")
+                    or item.get("time")
+                    or ""
                 ),
                 amount=_to_float(item.get("amount") or item.get("payFee") or item.get("money")),
                 qty=_to_float(item.get("payQty") or item.get("qty")),
-                pay_type=str(item.get("payType") or item.get("payTypeName") or ""),
+                pay_type=str(
+                    item.get("paytypedesc") or item.get("payType") or item.get("payTypeName") or ""
+                ),
             )
             for item in items
         ]
@@ -623,6 +629,9 @@ class ZrGasMpApi(ZrGasBaseApi):
             meter_no=info.get("meterNo", ""),
             meter_form_name=info.get("meterFormName", ""),
             card_no=info.get("cardNo", ""),
+            gas_price=_to_float(info.get("price")),
+            max_gas=_to_float(info.get("maxGas")),
+            cust_type=info.get("custType", ""),
             comp_name=info.get("compName", ""),
             cust_status=info.get("custStatus", ""),
             fee=info.get("fee", ""),
@@ -652,8 +661,12 @@ class ZrGasMpApi(ZrGasBaseApi):
         }
 
         result = await self._post(url, data)
-        _LOGGER.debug("getCustomerMoneyList raw items: %s", result.get("data"))
-        return _parse_bill_items(result.get("data"))
+        _LOGGER.debug("getCustomerMoneyList raw data: %s", result.get("data"))
+        raw = result.get("data")
+        # 实测: data 可能是账单数组（旧格式），也可能是对象、账单藏于 payGasCheckList
+        if isinstance(raw, dict) and raw.get("payGasCheckList"):
+            raw = raw["payGasCheckList"]
+        return _parse_bill_items(raw)
 
 
 class ZrGasPayApi(ZrGasBaseApi):
@@ -800,6 +813,17 @@ class ZrGasPayApi(ZrGasBaseApi):
         return bills
 
 
+def _usage_amount(item: dict[str, Any]) -> float:
+    """账单金额：应收优先；预付费账户 receivable 恒为 "0.00"（真值字符串，
+    不能用 or 链短路），按数值判断后回退实收 received/gasFee。"""
+    receivable = _to_float(item.get("receivable"))
+    if receivable > 0:
+        return receivable
+    return _to_float(
+        item.get("received") or item.get("gasFee") or item.get("usageAmount") or item.get("payFee")
+    )
+
+
 def _parse_bill_items(items: Any) -> list[ZrGasBill]:
     """Parse a bill list payload shared by both sources.
 
@@ -826,9 +850,7 @@ def _parse_bill_items(items: Any) -> list[ZrGasBill]:
                 usage_volume=_to_float(
                     item.get("curQty") or item.get("usageVolume") or item.get("gasVolume")
                 ),
-                usage_amount=_to_float(
-                    item.get("receivable") or item.get("usageAmount") or item.get("payFee")
-                ),
+                usage_amount=_usage_amount(item),
                 unit_price=_to_float(item.get("price") or item.get("unitPrice")),
             )
         )

@@ -430,3 +430,95 @@ class TestPaymentLog:
         session = _FakeSession({"status": 1, "data": None})
         api = ZrGasMpApi(session, access_token="t", user_id="u")
         assert await api.get_payment_log("C001") == []
+
+
+# ── v2.0.3: 实测原始返回结构（payGasCheckList / timeope / received） ──
+
+
+class TestRealPayloadMappings:
+    """基于 2026-10 实机抓包的真实返回结构。"""
+
+    @pytest.mark.asyncio
+    async def test_money_list_payload_with_pay_gas_check_list(self):
+        """data 为对象、账单藏于 payGasCheckList（实测结构）。"""
+        session = _FakeSession(
+            {
+                "status": 1,
+                "data": {
+                    "custCode": "C1",
+                    "balance": ".48",
+                    "payGasCheckList": [
+                        {
+                            "recordMonth": "202608",
+                            "curQty": "73",
+                            "receivable": "0.00",
+                            "received": "300.03",
+                            "gasFee": "300.03",
+                        },
+                        {
+                            "recordMonth": "202605",
+                            "curQty": "49",
+                            "receivable": "0.00",
+                            "received": "201.39",
+                            "gasFee": "201.39",
+                        },
+                    ],
+                },
+            }
+        )
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "202501", "202612")
+
+        assert len(bills) == 2
+        assert bills[0].period == "202608"
+        assert bills[0].usage_volume == 73.0
+        # 预付费账户 receivable=0 → 落到 received 实收
+        assert bills[0].usage_amount == 300.03
+
+    @pytest.mark.asyncio
+    async def test_payment_log_real_field_names(self):
+        """缴费记录实测字段: timeope / paytypedesc / qty=null / amount。"""
+        session = _FakeSession(
+            {
+                "status": 1,
+                "data": [
+                    {
+                        "qty": None,
+                        "amount": "300.00",
+                        "recordmonth": "202607",
+                        "paytypedesc": "微信扫码支付",
+                        "timeope": "2026-07-30 10:41:51",
+                    }
+                ],
+            }
+        )
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        payments = await api.get_payment_log("C1")
+
+        assert payments[0].pay_time == "2026-07-30 10:41:51"
+        assert payments[0].pay_type == "微信扫码支付"
+        assert payments[0].amount == 300.0
+
+    @pytest.mark.asyncio
+    async def test_mp_cust_info_max_gas(self):
+        """在线端实测也返回 maxGas/custType/price。"""
+        session = _FakeSession(
+            {
+                "status": 1,
+                "data": {
+                    "custCode": "C1",
+                    "countMoney": "0.48",
+                    "maxGas": "9999",
+                    "custType": "01",
+                    "price": None,
+                    "awardMoney": "0",
+                },
+            }
+        )
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        detail = await api.get_cust_info("C1", "*")
+
+        assert detail.max_gas == 9999.0
+        assert detail.cust_type == "01"
+        assert detail.gas_price == 0.0  # price=null → 0（未知）
+        assert detail.award_money == 0.0  # 真实 0
