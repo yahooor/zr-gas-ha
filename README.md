@@ -7,19 +7,6 @@ Home Assistant 自定义集成，从**中燃在线**平台（`zrds.95007.com`）
 
 本版本（v2.0.0）合并了原先的两个半成品集成 `zr-gas-ha` 与 `zr-gas`，将它们对应的**两个不同小程序数据来源**统一到一个集成中，归一化成同一套传感器。
 
-## 两个数据来源
-
-| | 在线端 (mp) | 缴费端 (pay) |
-|---|---|---|
-| 来源仓库 | zr-gas-ha | zr-gas |
-| 小程序 AppID | wx19c4e29f3ef6b4a0 | wx2082cbdc25b3b8e6 (`accessFrom: yphpaymp`) |
-| 登录方式 | **短信验证码**（免抓包）或 Token 导入 | 仅 Token 导入 |
-| 余额字段 | `countMoney` | `qtyBalance` |
-| 独有数据 | — | 单价 `price`、最大购气量 `maxGas`、新欠费 `newOweMoney`、客户类型、表具富化（通气日期/表具条码/安装位置/卡类型） |
-| 实测状态 (2026-10) | ✅ 登录链路存活 | ⚠️ 登录端点被网关封禁（status=255），仅数据端点可用 |
-
-> **实测说明**：2026-10 实机验证——在线端验证码图片、短信发送、登录端点均到达业务逻辑层且错误语义正确；缴费端的 `sendSmsCode`/`verifySmsCode` 即使携带完整小程序请求头也被网关以 `认证失败(255)` 拦截，因此缴费端只能 Token 导入。两个来源的数据端点同属 `/crm_controller/*` 网关路径族、共用同一套 accessToken 头，所以**在线端登录的 token 也会自动尝试表具富化端点**（getMeterInfo），调通即白赚字段、失败静默降级。
-
 ## 功能特性
 
 - **余额监控** — 实时燃气余额（元），余额不足自动提醒（HA 修复中心）
@@ -121,9 +108,8 @@ python scripts/verify_api.py --sms --mobile <手机号>
 
 ## 技术细节
 
-- **签名**: `md5(param + salt + timestamp)`，salt `yph1234567890`（在线端 JS 逆向确认）
+- **签名**: 请求带 MD5 签名（算法与盐值见源码 `api.py`，逆向自小程序前端）
 - **请求**: `application/x-www-form-urlencoded`（checkMasInfo 用 JSON）
-- **网关行为**: 无 token 访问 `/crm_controller/*` 统一返回 `status=255 认证失败`；缴费端登录端点亦被此策略拦截
 - **零外部依赖**（aiohttp/hashlib 均为 HA 内置）；最低 HA 2024.1.0
 
 ## 更新日志
@@ -134,13 +120,9 @@ python scripts/verify_api.py --sms --mobile <手机号>
 - 合并 `zr-gas-ha`（在线端）与 `zr-gas`（缴费端）两个集成为一个，配置时选择数据来源
 - 统一 API 层：`ZrGasBaseApi` 基类 + `ZrGasMpApi` / `ZrGasPayApi`，各自保留登录流程与字段映射（余额字段 countMoney vs qtyBalance 等差异在客户端内归一化）
 - 缴费端独有字段并入统一模型：燃气单价、赠送金额、最大购气量、新欠费、客户类型、表具富化（通气日期/条码/位置/卡类型）
-- 表具富化 getMeterInfo 对所有来源自动尝试（同网关路径族 token 通用），失败静默降级 — 在线端短信登录即可免抓包解锁缴费端字段
+- 表具富化 getMeterInfo 对所有来源自动尝试，失败静默降级 — 在线端短信登录即可免抓包获取额外表具字段
 
-**实测验证 (2026-10)**：
-- 在线端登录链路（验证码/发短信/登录）存活，错误语义与实现一致（-1 验证码错误 / 2 已过期）
-- 缴费端登录端点被网关认证层拦截（status=255，完整小程序头亦然）→ 短信登录移除，仅 Token 导入
-- 密码登录端点不存在（404 探测确认）
-- 附 `scripts/verify_api.py` 可重复验证
+**实测验证 (2026-10)**：两个数据来源的连通性与登录方式均经实机验证，详见更新日志与 `scripts/verify_api.py`。
 
 **工程**：
 - Config Flow VERSION 2 + 自动迁移（v1 条目升级不断实体）
@@ -158,7 +140,7 @@ python scripts/verify_api.py --sms --mobile <手机号>
 - [alickglyn](https://bbs.hassbian.com/thread-30786-1-1.html) — 原始 API 逆向分析
 - [gao19970120](https://bbs.hassbian.com/thread-31008-1-1.html) — Node-RED + MQTT 方案参考
 - [ExceptionsOccur/hazr](https://github.com/ExceptionsOccur/hazr) — 缴费记录端点（getPaymentLogForHsh）、埋点参数、methodEncrypt 加密协议（appKey/sign 密钥）借鉴
-- [githubdulong/Script (ChinaGas.js)](https://github.com/githubdulong/Script) — 「数据端点签名不校验、x-mas-app-info+userId 为真实凭据」的关键验证
+- [githubdulong/Script (ChinaGas.js)](https://github.com/githubdulong/Script) — 数据接口行为参考
 - [ha_hfcrgas](https://github.com/Cyborg2017/ha_hfcrgas) / [hztowngas](https://github.com/palafin02back/hztowngas) — 架构参考
 
 ## 免责声明
