@@ -114,6 +114,11 @@ python scripts/verify_api.py --sms --mobile <手机号>
 
 ## 更新日志
 
+### v2.0.1 — 修复登录会话关闭告警
+
+- **修复**: 登录流程改用自建自管的 aiohttp 会话（保留真实 CookieJar），不再关闭 HA 托管会话（消除 `closes the Home Assistant aiohttp session` 日志告警）
+- **改进**: 配置流程中止/取消时自动关闭登录会话，避免泄漏
+
 ### v2.0.0 — 双源合并重构
 
 **合并**：

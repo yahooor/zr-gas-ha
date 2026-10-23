@@ -23,11 +23,8 @@ import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers.aiohttp_client import (
-    async_create_clientsession,
-    async_get_clientsession,
-)
+from homeassistant.data_entry_flow import FlowResult, FlowResultType
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import ZrGasAuthError, ZrGasMpApi, ZrGasPayApi, ZrGasSmsError
 from .const import (
@@ -165,12 +162,9 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._mobile = mobile
                 session = async_get_clientsession(self.hass)
                 self._api = ZrGasMpApi(session)
-                # Create an independent session with a REAL CookieJar for the
-                # login flow (HA's shared session uses DummyCookieJar)
-                login_session = async_create_clientsession(
-                    self.hass,
-                    cookie_jar=aiohttp.CookieJar(unsafe=True),
-                )
+                # 自建自管的登录会话（非 HA 托管）：需要真实 CookieJar 保证
+                # 验证码→发短信→登录三步 cookie 连续；由集成自行关闭
+                login_session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
                 self._api.set_login_session(login_session)
                 return await self.async_step_captcha()
 
@@ -451,12 +445,8 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # 在线端: 短信重新登录
         self._api = ZrGasMpApi(session)
-        # Create an independent session with a REAL CookieJar for the
-        # login flow (same reason as async_step_user)
-        login_session = async_create_clientsession(
-            self.hass,
-            cookie_jar=aiohttp.CookieJar(unsafe=True),
-        )
+        # 自建自管的登录会话（同 async_step_user，由集成自行关闭）
+        login_session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True))
         self._api.set_login_session(login_session)
         return await self.async_step_reauth_captcha()
 
@@ -624,6 +614,12 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
+
+    async def async_finish_flow(self, flow, result):
+        """流程结束（含用户取消/中止）时关闭自管的登录会话，避免泄漏。"""
+        if self._api is not None and result.get("type") != FlowResultType.CREATE_ENTRY:
+            await self._api.close_login_session()
+        return result
 
     # ── Options Flow ─────────────────────────────────────────────────
 
