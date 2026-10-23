@@ -205,6 +205,7 @@ class ZrGasBaseApi:
         }
 
         result = await self._post(url, data)
+        _LOGGER.debug("getPaymentLogForHsh raw items: %s", result.get("data"))
 
         items = result.get("data") or []
         if isinstance(items, dict):
@@ -651,6 +652,7 @@ class ZrGasMpApi(ZrGasBaseApi):
         }
 
         result = await self._post(url, data)
+        _LOGGER.debug("getCustomerMoneyList raw items: %s", result.get("data"))
         return _parse_bill_items(result.get("data"))
 
 
@@ -792,6 +794,7 @@ class ZrGasPayApi(ZrGasBaseApi):
             }
 
             result = await self._post(url, data)
+            _LOGGER.debug("queryBillHistory raw items (%s): %s", year, result.get("data"))
             bills.extend(_parse_bill_items(result.get("data")))
 
         return bills

@@ -447,7 +447,8 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 matched_bill = current_bill or bill_list[-1]
                 monthly_usage = matched_bill.usage_volume
                 monthly_cost = matched_bill.usage_amount
-                period = matched_bill.period
+                if matched_bill.period:
+                    period = matched_bill.period
                 unit_price = matched_bill.unit_price
 
             # ── 统计计算 ──────────────────────────────────────
