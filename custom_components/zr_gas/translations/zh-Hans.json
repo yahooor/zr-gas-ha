@@ -3,8 +3,9 @@
     "step": {
       "user": {
         "title": "中燃在线登录",
-        "description": "选择登录方式。\n短信登录需要图形验证码和短信验证码；Token 导入可直接粘贴已获取的凭据。",
+        "description": "选择数据来源和登录方式。\n\n在线端：支持短信验证码登录（推荐，免抓包）和 Token 导入。\n缴费端：仅支持 Token 导入（其短信登录接口已被服务端封禁）。",
         "data": {
+          "source": "数据来源",
           "auth_method": "登录方式",
           "mobile": "手机号码"
         }
@@ -51,7 +52,7 @@
       "api_error": "API 调用失败"
     },
     "abort": {
-      "already_configured": "该手机号已经配置过",
+      "already_configured": "该数据来源下此手机号已经配置过",
       "reauth_successful": "重新认证成功"
     }
   },
@@ -89,6 +90,14 @@
         "data": {
           "sms_code": "短信验证码"
         }
+      },
+      "reauth_token": {
+        "title": "重新认证 - Token 导入",
+        "description": "缴费端数据来源的 Token 已过期。缴费端不支持短信登录，请从缴费小程序重新抓包获取新的 Access Token 和 User ID 后填入。",
+        "data": {
+          "access_token": "Access Token（必填）",
+          "user_id": "User ID（必填）"
+        }
       }
     },
     "error": {
@@ -96,6 +105,8 @@
       "sms_code_required": "请输入短信验证码",
       "sms_send_failed": "验证码发送失败",
       "invalid_sms_code": "短信验证码错误或已过期",
+      "invalid_token": "认证失败，请检查 Token 是否正确",
+      "token_required": "Access Token 和 User ID 为必填项",
       "connection_error": "连接失败，请检查网络"
     }
   },
@@ -113,6 +124,15 @@
       "owe_money": {
         "name": "欠费金额"
       },
+      "award_money": {
+        "name": "赠送金额"
+      },
+      "gas_price": {
+        "name": "燃气单价"
+      },
+      "max_gas": {
+        "name": "最大购气量"
+      },
       "last_record": {
         "name": "表读数"
       },
@@ -124,6 +144,9 @@
       },
       "last_record_time": {
         "name": "最后抄表日期"
+      },
+      "last_payment": {
+        "name": "最近缴费"
       },
       "annual_usage": {
         "name": "年度累计用量"

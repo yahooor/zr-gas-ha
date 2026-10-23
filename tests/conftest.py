@@ -1,6 +1,5 @@
 """Shared fixtures and path setup for zr_gas unit tests."""
 
-import importlib
 import sys
 import types
 from pathlib import Path
@@ -17,6 +16,7 @@ if _CC_DIR not in sys.path:
 # zr_gas.const are pure Python.  We mock the bare minimum so that
 # importing the package doesn't crash.
 
+
 def _setup_ha_mocks():
     """Create minimal homeassistant mock modules so zr_gas can be imported."""
     ha = types.ModuleType("homeassistant")
@@ -29,14 +29,22 @@ def _setup_ha_mocks():
         "homeassistant.core": types.ModuleType("homeassistant.core"),
         "homeassistant.exceptions": types.ModuleType("homeassistant.exceptions"),
         "homeassistant.helpers": types.ModuleType("homeassistant.helpers"),
-        "homeassistant.helpers.aiohttp_client": types.ModuleType("homeassistant.helpers.aiohttp_client"),
-        "homeassistant.helpers.issue_registry": types.ModuleType("homeassistant.helpers.issue_registry"),
-        "homeassistant.helpers.update_coordinator": types.ModuleType("homeassistant.helpers.update_coordinator"),
+        "homeassistant.helpers.aiohttp_client": types.ModuleType(
+            "homeassistant.helpers.aiohttp_client"
+        ),
+        "homeassistant.helpers.issue_registry": types.ModuleType(
+            "homeassistant.helpers.issue_registry"
+        ),
+        "homeassistant.helpers.update_coordinator": types.ModuleType(
+            "homeassistant.helpers.update_coordinator"
+        ),
         "homeassistant.util": types.ModuleType("homeassistant.util"),
         "homeassistant.util.dt": types.ModuleType("homeassistant.util.dt"),
         "homeassistant.components": types.ModuleType("homeassistant.components"),
         "homeassistant.components.sensor": types.ModuleType("homeassistant.components.sensor"),
-        "homeassistant.helpers.entity_platform": types.ModuleType("homeassistant.helpers.entity_platform"),
+        "homeassistant.helpers.entity_platform": types.ModuleType(
+            "homeassistant.helpers.entity_platform"
+        ),
     }
     for name, mod in submods.items():
         sys.modules[name] = mod
@@ -50,16 +58,25 @@ def _setup_ha_mocks():
     ha.util = submods["homeassistant.util"]
     ha.components = submods["homeassistant.components"]
 
-    submods["homeassistant.helpers"].aiohttp_client = submods["homeassistant.helpers.aiohttp_client"]
-    submods["homeassistant.helpers"].issue_registry = submods["homeassistant.helpers.issue_registry"]
-    submods["homeassistant.helpers"].update_coordinator = submods["homeassistant.helpers.update_coordinator"]
-    submods["homeassistant.helpers"].entity_platform = submods["homeassistant.helpers.entity_platform"]
+    submods["homeassistant.helpers"].aiohttp_client = submods[
+        "homeassistant.helpers.aiohttp_client"
+    ]
+    submods["homeassistant.helpers"].issue_registry = submods[
+        "homeassistant.helpers.issue_registry"
+    ]
+    submods["homeassistant.helpers"].update_coordinator = submods[
+        "homeassistant.helpers.update_coordinator"
+    ]
+    submods["homeassistant.helpers"].entity_platform = submods[
+        "homeassistant.helpers.entity_platform"
+    ]
     submods["homeassistant.util"].dt = submods["homeassistant.util.dt"]
     submods["homeassistant.components"].sensor = submods["homeassistant.components.sensor"]
 
     # Provide dt utilities
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     dt_mod = submods["homeassistant.util.dt"]
     dt_mod.DEFAULT_TIME_ZONE = ZoneInfo("Asia/Shanghai")
     dt_mod.now = lambda: datetime.now(tz=dt_mod.DEFAULT_TIME_ZONE)
@@ -71,40 +88,58 @@ def _setup_ha_mocks():
 
     # Provide SensorDeviceClass, SensorEntity, etc.
     sensor_mod = submods["homeassistant.components.sensor"]
-    sensor_mod.SensorDeviceClass = type("SensorDeviceClass", (), {
-        "MONETARY": "monetary",
-        "GAS": "gas",
-        "TIMESTAMP": "timestamp",
-    })
+    sensor_mod.SensorDeviceClass = type(
+        "SensorDeviceClass",
+        (),
+        {
+            "MONETARY": "monetary",
+            "GAS": "gas",
+            "TIMESTAMP": "timestamp",
+        },
+    )
     sensor_mod.SensorEntity = type("SensorEntity", (), {})
     sensor_mod.SensorEntityDescription = type("SensorEntityDescription", (), {})
-    sensor_mod.SensorStateClass = type("SensorStateClass", (), {
-        "TOTAL": "total",
-    })
+    sensor_mod.SensorStateClass = type(
+        "SensorStateClass",
+        (),
+        {
+            "TOTAL": "total",
+        },
+    )
 
     # Provide ConfigEntry, UpdateFailed, etc.
     submods["homeassistant.config_entries"].ConfigEntry = type("ConfigEntry", (), {})
     submods["homeassistant.core"].HomeAssistant = type("HomeAssistant", (), {})
-    submods["homeassistant.exceptions"].ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (Exception,), {})
+    submods["homeassistant.exceptions"].ConfigEntryAuthFailed = type(
+        "ConfigEntryAuthFailed", (Exception,), {}
+    )
+
     # DataUpdateCoordinator[T] must be subscriptable (generic syntax)
     class _GenericBase:
         def __class_getitem__(cls, item):
             return cls
+
     submods["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = type(
         "DataUpdateCoordinator", (_GenericBase,), {}
     )
-    submods["homeassistant.helpers.update_coordinator"].UpdateFailed = type("UpdateFailed", (Exception,), {})
-    submods["homeassistant.helpers.entity_platform"].AddEntitiesCallback = type("AddEntitiesCallback", (), {})
+    submods["homeassistant.helpers.update_coordinator"].UpdateFailed = type(
+        "UpdateFailed", (Exception,), {}
+    )
+    submods["homeassistant.helpers.entity_platform"].AddEntitiesCallback = type(
+        "AddEntitiesCallback", (), {}
+    )
     submods["homeassistant.helpers.aiohttp_client"].async_get_clientsession = lambda hass: None
     submods["homeassistant.helpers.issue_registry"].async_create_issue = lambda *a, **k: None
     submods["homeassistant.helpers.issue_registry"].async_delete_issue = lambda *a, **k: None
-    submods["homeassistant.helpers.issue_registry"].IssueSeverity = type("IssueSeverity", (), {"WARNING": "warning"})
+    submods["homeassistant.helpers.issue_registry"].IssueSeverity = type(
+        "IssueSeverity", (), {"WARNING": "warning"}
+    )
     submods["homeassistant.helpers"].CoordinatorEntity = type("CoordinatorEntity", (), {})
+
 
 _setup_ha_mocks()
 
 import pytest
-
 from zr_gas.models import TierConfig
 
 

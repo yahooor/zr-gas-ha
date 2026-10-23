@@ -1,25 +1,30 @@
-"""API client for the 中燃在线 (ZR Gas) integration.
+"""API clients for the 中燃在线 (ZR Gas) integration.
 
-This module implements the ZrGasAPI class that communicates with the
-ZR Gas cloud API at https://zrds.95007.com.
+同一后端 (https://zrds.95007.com) 的两个小程序数据来源：
 
-Key findings from reverse-engineering the web app JS (index.fd387e5a.js):
-- Salt: "yph1234567890"
-- Signature: md5(param + salt + timeStamp)
-- Param priority: specified field > autoSrvId > custCode > compcode > compCode > userId > mobile > fileName
-- Content-Type: application/x-www-form-urlencoded (NOT JSON)
-- Response format: {"data": {...}, "message": "...", "status": 1}
+**在线端 (:class:`ZrGasMpApi`)** — 原 zr-gas-ha 集成，来自 uniapp 小程序
+(Referer appid: wx19c4e29f3ef6b4a0)。2026-10 实测存活：
+- GET  /controller/merchant/authCode.do → 真实验证码图片 ✅
+- POST /user/sendsms3.do → status=-1 "图形验证码不正确"（业务层）✅
+- POST /user/xcxMobileUserLogin → status=2 "请重新获取验证码"（业务层）✅
 
-Login flow (from pages-login-login.js):
-1. GET captcha image: /controller/merchant/authCode.do?flag={mobile}&tn={timestamp}
-2. POST send SMS: /user/sendsms3.do  body: {codeKey, codeKeyValue, mobile}
-3. POST SMS login: /user/xcxMobileUserLogin  body: {mobile, code, channelType:6}
-   → returns {masToken, sid, data: {id, mobile, ...}}
-   → sid needs prefix: "aaahg10001/" + sid → x-mas-app-info header
+关键协议（逆向自网页 JS index.fd387e5a.js）：
+- Salt: "yph1234567890"，签名 md5(param + salt + timeStamp)
+- 登录返回 masToken + sid → 头部 x-mas-app-info: "aaahg10001/" + sid
+- 表单编码（checkMasInfo 除外，用 JSON）
+
+**缴费端 (:class:`ZrGasPayApi`)** — 原 zr-gas 集成，来自缴费小程序
+(Referer appid: wx2082cbdc25b3b8e6, accessFrom: yphpaymp)。
+2026-10 实测：登录端点 sendSmsCode/verifySmsCode 被网关在认证层
+拦截（status=255，带完整小程序头也一样），**短信登录不可用**，
+仅支持 Token 导入（accessToken + userId 抓包获取）。数据端点
+（findCustInfo 的 qtyBalance 字段族 / getMeterInfo / queryBillHistory）
+需有效 Token 后调用，字段映射基于原抓包数据。
 """
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import time
@@ -36,11 +41,23 @@ from .const import (
     ENDPOINT_GET_CUSTOMERS,
     ENDPOINT_INIT,
     ENDPOINT_LOGIN_SMS,
+    ENDPOINT_PAY_BILL_HISTORY,
+    ENDPOINT_PAY_METER_INFO,
+    ENDPOINT_PAYMENT_LOG,
     ENDPOINT_SEND_SMS,
+    PAY_EXTRA_HEADERS,
     SIGN_SALT,
+    SOURCE_MP,
+    SOURCE_PAY,
     X_MAS_SID_PREFIX,
 )
-from .models import ZrGasBill, ZrGasCustomer, ZrGasCustomerDetail
+from .models import (
+    ZrGasBill,
+    ZrGasCustomer,
+    ZrGasCustomerDetail,
+    ZrGasMeterInfo,
+    ZrGasPayment,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,25 +74,30 @@ class ZrGasSmsError(ZrGasApiError):
     """Error during SMS verification code flow."""
 
 
-class ZrGasAPI:
-    """Async API client for 中燃在线 (ZR Gas) cloud services.
+def _to_float(val: Any, default: float = 0.0) -> float:
+    """Best-effort float conversion for API values."""
+    try:
+        return float(val) if val is not None else default
+    except (ValueError, TypeError):
+        return default
 
-    Supports two authentication modes:
-    1. **SMS login** (user-friendly): mobile + captcha + SMS code → masToken
-    2. **Direct token** (advanced): use a pre-obtained accessToken directly
 
-    Usage::
+def _to_int(val: Any, default: int = 0) -> int:
+    """Best-effort int conversion for API values."""
+    try:
+        return int(float(val)) if val is not None else default
+    except (ValueError, TypeError):
+        return default
 
-        session = async_get_clientsession(hass)
 
-        # SMS login flow
-        api = ZrGasAPI(session)
-        await api.send_sms_code(mobile, "1234")
-        await api.login_with_sms(mobile, "654321")
+class ZrGasBaseApi:
+    """两个数据来源共享的请求基础：签名、时间戳、状态码归一化。
 
-        # Or use existing token
-        api = ZrGasAPI(session, access_token="...", user_id="...", x_mas_app_info="...")
+    Subclasses provide source-specific headers via ``_extra_headers``
+    and their own login/data methods.
     """
+
+    source = ""  # SOURCE_MP / SOURCE_PAY, set by subclasses
 
     def __init__(
         self,
@@ -88,9 +110,9 @@ class ZrGasAPI:
 
         Args:
             session: aiohttp client session for making HTTP requests.
-            access_token: Access token (masToken) from login response.
+            access_token: Access token from login response.
             user_id: User identifier (passed as header in most API calls).
-            x_mas_app_info: x-mas-app-info value from login response (sid with prefix).
+            x_mas_app_info: x-mas-app-info header value (online source only).
         """
         self._session = session
         self._access_token = access_token
@@ -104,17 +126,7 @@ class ZrGasAPI:
         # via ``async_create_clientsession(hass, cookie_jar=aiohttp.CookieJar(unsafe=True))``.
         self._login_session: aiohttp.ClientSession | None = None
 
-    def set_login_session(self, session: aiohttp.ClientSession) -> None:
-        """Set an independent session with a real CookieJar for login flow.
-
-        Must be called before ``fetch_captcha_image()`` / ``send_sms_code()``
-        / ``login_with_sms()`` so that JSESSIONID and other cookies persist
-        across all three requests.
-
-        Args:
-            session: An ``aiohttp.ClientSession`` with a real ``CookieJar``.
-        """
-        self._login_session = session
+    # ── Credentials ────────────────────────────────────────────────
 
     @property
     def access_token(self) -> str:
@@ -131,12 +143,19 @@ class ZrGasAPI:
         """Return the current x-mas-app-info header value."""
         return self._x_mas_app_info
 
-    def _get_login_session(self) -> aiohttp.ClientSession:
-        """Get the session to use for login flow requests.
+    # ── Login session management ───────────────────────────────────
 
-        Returns the independent login session (with real CookieJar) if set,
-        otherwise falls back to HA's shared session.
+    def set_login_session(self, session: aiohttp.ClientSession) -> None:
+        """Set an independent session with a real CookieJar for login flow.
+
+        Must be called before ``fetch_captcha_image()`` / ``send_sms_code()``
+        / ``login_with_sms()`` so that JSESSIONID and other cookies persist
+        across all three requests (online source only).
         """
+        self._login_session = session
+
+    def _get_login_session(self) -> aiohttp.ClientSession:
+        """Return the login session if set, else the shared session."""
         if self._login_session is not None and not self._login_session.closed:
             return self._login_session
         return self._session
@@ -145,39 +164,229 @@ class ZrGasAPI:
         """Close the independent login session after login is complete."""
         if self._login_session and not self._login_session.closed:
             await self._login_session.close()
-            self._login_session = None
+        self._login_session = None
+
+    # ── Signature helpers ──────────────────────────────────────────
+
+    def _generate_signature(self, param: str, timestamp: str) -> str:
+        """Generate an MD5 signature: md5(param + salt + timestamp)."""
+        raw = f"{param}{SIGN_SALT}{timestamp}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _get_timestamp() -> str:
+        """Return current timestamp in milliseconds as a string."""
+        return str(int(time.time() * 1000))
+
+    # ── 缴费记录（best-effort, 借鉴 hazr 项目的端点与参数） ─────────
+
+    async def get_payment_log(self, cust_code: str, days: int = 180) -> list[ZrGasPayment]:
+        """Query recent payment/recharge history (best-effort).
+
+        POST /crm_controller/payfee/getPaymentLogForHsh
+        params: custCode + startTime/endTime (YYYYMMDD) + plain signature
+        （与 getCustomerMoneyList 同路径族同签名方式，任何来源 token 可尝试）。
+        排序：按 payTime 降序（最新在前）。
+        """
+        now = datetime.datetime.now()
+        end_time = now.strftime("%Y%m%d")
+        start_time = (now - datetime.timedelta(days=days)).strftime("%Y%m%d")
+
+        url = f"{BASE_URL}{ENDPOINT_PAYMENT_LOG}"
+        timestamp = self._get_timestamp()
+        signature = self._generate_signature(cust_code, timestamp)
+
+        data = {
+            "custCode": cust_code,
+            "startTime": start_time,
+            "endTime": end_time,
+            "timeStamp": timestamp,
+            "signature": signature,
+        }
+
+        result = await self._post(url, data)
+
+        items = result.get("data") or []
+        if isinstance(items, dict):
+            items = [items]
+
+        payments = [
+            ZrGasPayment(
+                pay_time=str(
+                    item.get("payTime") or item.get("createTime") or item.get("time") or ""
+                ),
+                amount=_to_float(item.get("amount") or item.get("payFee") or item.get("money")),
+                qty=_to_float(item.get("payQty") or item.get("qty")),
+                pay_type=str(item.get("payType") or item.get("payTypeName") or ""),
+            )
+            for item in items
+        ]
+        payments.sort(key=lambda p: p.pay_time, reverse=True)
+        return payments
+
+    # ── Meter enrichment (best-effort, any source) ─────────────────
+
+    async def get_meter_info(self, cust_code: str) -> ZrGasMeterInfo | None:
+        """Query meter enrichment info (best-effort for any source).
+
+        getMeterInfo 属缴费端小程序的端点，但与 getBindGasCustList 等
+        在线端已在使用的端点同属 /crm_controller/* 网关路径族、同一套
+        accessToken 头 — 在线端登录的 token 大概率同样可调通。因此对
+        所有来源都尝试调用；失败由 Coordinator 捕获并降级为空，不影响
+        主数据。
+
+        Signature: md5(custCode + envir + salt + ts), envir="2".
+        字段: meterNo / cardType / cardNo / ventDate / barCode / meterloc.
+        """
+        url = f"{BASE_URL}{ENDPOINT_PAY_METER_INFO}"
+        timestamp = self._get_timestamp()
+        signature = self._generate_signature(f"{cust_code}2", timestamp)
+
+        data = {
+            "custCode": cust_code,
+            "envir": "2",
+            "timeStamp": timestamp,
+            "signature": signature,
+        }
+
+        result = await self._post(url, data)
+
+        items = result.get("data") or []
+        if isinstance(items, dict):
+            items = [items]
+        if not items:
+            return None
+
+        info = items[0]
+        return ZrGasMeterInfo(
+            meter_no=info.get("meterNo", ""),
+            card_type=info.get("cardType", ""),
+            card_no=info.get("cardNo", ""),
+            vent_date=info.get("ventDate", ""),
+            bar_code=info.get("barCode", ""),
+            meter_loc=info.get("meterloc", ""),
+        )
+
+    # ── Request plumbing ───────────────────────────────────────────
+
+    def _extra_headers(self) -> dict[str, str]:
+        """Source-specific extra headers, merged into every request."""
+        return {}
+
+    async def _post(
+        self,
+        url: str,
+        data: dict[str, Any],
+        headers: dict[str, str] | None = None,
+        as_json: bool = False,
+    ) -> dict[str, Any]:
+        """Send a POST request and return the normalized JSON response.
+
+        The API uses two content types:
+        - Most endpoints: application/x-www-form-urlencoded (data=)
+        - checkMasInfo: application/json (json=)
+
+        Raises:
+            ZrGasAuthError: HTTP 401/403, status=255, or token/login errors.
+            ZrGasApiError: Other non-success responses.
+        """
+        content_type = "application/json" if as_json else "application/x-www-form-urlencoded"
+        request_headers = {
+            "Content-Type": content_type,
+            "accessToken": self._access_token,
+            "platform": "mp-weixin",
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        if self._user_id:
+            request_headers["userId"] = self._user_id
+        if self._x_mas_app_info:
+            request_headers["x-mas-app-info"] = self._x_mas_app_info
+        request_headers.update(self._extra_headers())
+        if headers:
+            request_headers.update(headers)
+
+        _LOGGER.debug("POST %s (content_type=%s)", url, content_type)
+
+        kwargs: dict[str, Any] = {"headers": request_headers}
+        if as_json:
+            kwargs["json"] = data
+        else:
+            kwargs["data"] = data
+
+        async with self._session.post(url, **kwargs) as resp:
+            if resp.status in (401, 403):
+                raise ZrGasAuthError(f"HTTP {resp.status}: authentication failed")
+            resp.raise_for_status()
+            result: dict[str, Any] = await resp.json()
+
+        _LOGGER.debug(
+            "Response status=%s message=%s",
+            result.get("status"),
+            result.get("message"),
+        )
+
+        # Response status normalization.
+        # NOTE: status may be int (1) or string ("1"); checkMasInfo instead
+        # returns {"code": 200, "success": true} without "status".
+        status = result.get("status")
+        code = result.get("code")
+        success = result.get("success")
+        message = result.get("message", "")
+
+        if status in (1, "1") or code in (200, "200") or success is True:
+            return result
+
+        # Gateway-level auth rejection (verified live: no-token requests to
+        # /crm_controller/* return {"status": "255", "message": "认证失败..."})
+        if str(status) == "255":
+            raise ZrGasAuthError(f"Auth failed: {message or '认证失败'}")
+        # Token invalid/expired based on response message
+        # IMPORTANT: "token有效" means token IS valid, must NOT be treated as error
+        if message and "token" in message.lower() and "有效" not in message:
+            raise ZrGasAuthError(f"Auth failed: {message}")
+        if "登录" in message and "成功" not in message:
+            raise ZrGasAuthError(f"Auth failed: {message}")
+
+        raise ZrGasApiError(f"API error (status={status}): {message}")
+
+
+class ZrGasMpApi(ZrGasBaseApi):
+    """在线端 API 客户端（原 zr-gas-ha，经实机验证可用）。
+
+    登录流程（验证码 → 短信 → 登录）::
+
+        api = ZrGasMpApi(session)
+        api.set_login_session(login_session_with_real_cookiejar)
+        await api.send_sms_code(mobile, "1234")     # 图形验证码
+        await api.login_with_sms(mobile, "654321")  # 短信验证码
+
+    或直接使用已有 Token::
+
+        api = ZrGasMpApi(session, access_token="...", user_id="...",
+                         x_mas_app_info="...")
+    """
+
+    source = SOURCE_MP
+
+    # ── Login flow ─────────────────────────────────────────────────
 
     def get_captcha_url(self, mobile: str) -> str:
-        """Get the URL for the captcha image associated with a mobile number.
+        """Return the captcha image URL for a mobile number.
 
-        The captcha image is fetched as a GET request and displayed to the
-        user for manual entry.
-
-        Args:
-            mobile: Mobile phone number (11 digits).
-
-        Returns:
-            Full URL to the captcha image.
+        Verified live: returns a real 80x26 PNG image.
         """
         timestamp = str(int(time.time() * 1000))
         return f"{BASE_URL}{ENDPOINT_CAPTCHA_IMG}?flag={mobile}&tn={timestamp}"
 
     async def send_sms_code(self, mobile: str, captcha_code: str) -> None:
-        """Send an SMS verification code to the given mobile number.
+        """Send an SMS verification code (step 2 of login).
 
-        Step2 of the login flow. The user must first solve the captcha
-        image returned by ``get_captcha_url()``.
+        POST /user/sendsms3.do with {codeKey, codeKeyValue, mobile}.
 
-        API endpoint: ``POST /user/sendsms3.do``
-        Body: ``{codeKey: mobile, codeKeyValue: captcha_code, mobile: mobile}``
-
-        Args:
-            mobile: Mobile phone number (11 digits).
-            captcha_code: The captcha text the user entered from the image.
-
-        Raises:
-            ZrGasSmsError: If the SMS code could not be sent
-                (wrong captcha, rate limited, etc.).
+        Verified live error semantics:
+          status=-1 → wrong captcha ("输入的图形验证码不正确")
+          status=2  → captcha expired
         """
         url = f"{BASE_URL}{ENDPOINT_SEND_SMS}"
         data = {
@@ -187,16 +396,16 @@ class ZrGasAPI:
         }
 
         try:
-            # Use login session (with real CookieJar) for cookie consistency
             login_session = self._get_login_session()
 
-            # Debug: log session cookies
             cookie_str = ""
             for cookie in login_session.cookie_jar:
                 cookie_str += f"{cookie.key}={cookie.value}(path={cookie['path']}) "
             _LOGGER.debug(
                 "SMS send: mobile=%s****%s, code=****, session_cookies=[%s]",
-                mobile[:3], mobile[-4:], cookie_str,
+                mobile[:3],
+                mobile[-4:],
+                cookie_str,
             )
 
             request_headers = {
@@ -204,54 +413,37 @@ class ZrGasAPI:
                 "Accept": "*/*",
                 "Accept-Language": "zh-CN,zh;q=0.9",
             }
-            async with login_session.post(
-                url, headers=request_headers, data=data
-            ) as resp:
+            async with login_session.post(url, headers=request_headers, data=data) as resp:
                 resp.raise_for_status()
                 result = await resp.json()
+        except ZrGasApiError:
+            raise
         except Exception as err:
             raise ZrGasSmsError(f"Failed to send SMS code: {err}") from err
 
         status = result.get("status")
         message = result.get("message", "")
-        # API status codes vary by endpoint:
-        #   status=1 → success, status=0 → may also be success ("操作成功")
-        #   status=2 → verification code expired
-        #   status=-1 → wrong captcha / input error
+        # status=2 → verification code expired
+        # status=-1 → wrong captcha / input error
         # NOTE: API may return status as string ("1") or int (1)
         if status in (2, "2"):
-            raise ZrGasSmsError(f"发送验证码失败: 验证码已过期，请重新获取")
+            raise ZrGasSmsError("发送验证码失败: 验证码已过期，请重新获取")
         if str(status) not in ("0", "1") and "成功" not in message:
             raise ZrGasSmsError(f"发送验证码失败: {message or '未知错误'}")
 
         _LOGGER.info("SMS code sent successfully to %s****%s", mobile[:3], mobile[-4:])
 
-    async def login_with_sms(
-        self, mobile: str, sms_code: str
-    ) -> dict[str, Any]:
-        """Login using mobile number and SMS verification code.
+    async def login_with_sms(self, mobile: str, sms_code: str) -> dict[str, Any]:
+        """Login with mobile + SMS code (step 3 of login).
 
-        Step3 of the login flow. On success, stores the returned
-        masToken, userId, and x-mas-app-info internally for subsequent
-        API calls.
+        POST /user/xcxMobileUserLogin with
+        {mobile, code, channelType: 6, openId: "", unionId: ""}.
 
-        API endpoint: ``POST /user/xcxMobileUserLogin``
-        Body: ``{mobile, code, channelType: 6, openId: "", unionId: ""}``
+        On success stores masToken / userId / x-mas-app-info internally.
 
-        Response contains:
-        - ``masToken``: Access token for subsequent API calls
-        - ``sid``: Session ID (needs prefix "aaahg10001/" for x-mas-app-info header)
-        - ``data``: User info dict with ``id``, ``mobile``, etc.
-
-        Args:
-            mobile: Mobile phone number.
-            sms_code: The 6-digit SMS verification code.
-
-        Returns:
-            Full API response dict including user data.
-
-        Raises:
-            ZrGasAuthError: If login fails (wrong code, expired, etc.).
+        Verified live error semantics:
+          status=2  → code expired ("请重新获取验证码")
+          status=-1 → wrong code ("验证码输入不正确")
         """
         url = f"{BASE_URL}{ENDPOINT_LOGIN_SMS}"
         data = {
@@ -269,27 +461,25 @@ class ZrGasAPI:
                 "Accept": "*/*",
                 "Accept-Language": "zh-CN,zh;q=0.9",
             }
-            async with login_session.post(
-                url, headers=login_headers, data=data
-            ) as resp:
+            async with login_session.post(url, headers=login_headers, data=data) as resp:
                 resp.raise_for_status()
                 result = await resp.json()
+        except ZrGasApiError:
+            raise
         except Exception as err:
             raise ZrGasAuthError(f"SMS login failed: {err}") from err
 
         status = result.get("status")
         message = result.get("message", "")
-        _LOGGER.debug("Login response: status=%s, message=%s, data_keys=%s",
-                      status, message, list((result.get("data") or {}).keys()))
+        _LOGGER.debug(
+            "Login response: status=%s, message=%s, data_keys=%s",
+            status,
+            message,
+            list((result.get("data") or {}).keys()),
+        )
 
-        # API status codes for login:
-        #   status=1 → success
-        #   status=0 → may also be success (some endpoints use 0 for OK)
-        #   status=2 → verification code expired ("请重新获取验证码")
-        #   status=-1 → wrong verification code ("验证码输入不正确")
-        # NOTE: API may return status as string ("1") or int (1)
         if status in (2, "2"):
-            raise ZrGasAuthError(f"登录失败: 验证码已过期，请重新获取")
+            raise ZrGasAuthError("登录失败: 验证码已过期，请重新获取")
         if status in (-1, "-1"):
             raise ZrGasAuthError(f"登录失败: {message or '验证码输入不正确'}")
         if str(status) not in ("0", "1") and "成功" not in message:
@@ -320,133 +510,20 @@ class ZrGasAPI:
 
         return result
 
-    def _generate_signature(self, param: str, timestamp: str) -> str:
-        """Generate an MD5 signature for API request authentication.
-
-        Algorithm: md5(param + salt + timestamp)
-        Salt: "yph1234567890" (reverse-engineered from web JS)
-
-        Args:
-            param: The primary business parameter (userId, custCode, etc.).
-            timestamp: Current millisecond timestamp string.
-
-        Returns:
-            MD5 hex digest.
-        """
-        raw = f"{param}{SIGN_SALT}{timestamp}"
-        return hashlib.md5(raw.encode("utf-8")).hexdigest()
-
-    def _get_timestamp(self) -> str:
-        """Return current timestamp in milliseconds.
-
-        Returns:
-            String representation of current epoch time in milliseconds.
-        """
-        return str(int(time.time() * 1000))
-
-    async def _post(
-        self,
-        url: str,
-        data: dict[str, Any],
-        headers: dict[str, str] | None = None,
-        as_json: bool = False,
-    ) -> dict[str, Any]:
-        """Send a POST request to the API and return the JSON response.
-
-        The API uses two content types:
-        - Most endpoints: application/x-www-form-urlencoded (data=)
-        - checkMasInfo: application/json (json=)
-
-        Args:
-            url: Full URL to POST to.
-            data: Request body data.
-            headers: Optional additional headers.
-            as_json: If True, send as JSON body; otherwise form-encoded.
-
-        Returns:
-            Parsed JSON response dict.
-
-        Raises:
-            ZrGasAuthError: If the API returns an authentication error.
-            ZrGasApiError: If the API returns a non-success response.
-            aiohttp.ClientError: On network-level errors.
-        """
-        content_type = "application/json" if as_json else "application/x-www-form-urlencoded"
-        request_headers = {
-            "Content-Type": content_type,
-            "accessToken": self._access_token,
-            "platform": "mp-weixin",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        }
-        if self._user_id:
-            request_headers["userId"] = self._user_id
-        if self._x_mas_app_info:
-            request_headers["x-mas-app-info"] = self._x_mas_app_info
-        if headers:
-            request_headers.update(headers)
-
-        _LOGGER.debug("POST %s (content_type=%s)", url, content_type)
-
-        kwargs: dict[str, Any] = {"headers": request_headers}
-        if as_json:
-            kwargs["json"] = data
-        else:
-            kwargs["data"] = data
-
-        async with self._session.post(url, **kwargs) as resp:
-            if resp.status in (401, 403):
-                raise ZrGasAuthError(f"HTTP {resp.status}: authentication failed")
-            resp.raise_for_status()
-            result: dict[str, Any] = await resp.json()
-
-        _LOGGER.debug(
-            "Response status=%s message=%s",
-            result.get("status"),
-            result.get("message"),
-        )
-
-        # Check response status
-        # Confirmed: API returns {"status": 1, "message": "...", "data": {...}}
-        # NOTE: checkMasInfo returns {"code": 200, "success": true, "message": "token有效"}
-        #       without a "status" field — so also check code/success.
-        # NOTE: API sometimes returns status as string "1" instead of int 1
-        status = result.get("status")
-        code = result.get("code")
-        success = result.get("success")
-        message = result.get("message", "")
-
-        if status in (1, "1") or code in (200, "200") or success is True:
-            return result
-
-        # Token invalid/expired based on response message
-        # IMPORTANT: "token有效" means token IS valid, must NOT be treated as error
-        if message and "token" in message.lower() and "有效" not in message:
-            raise ZrGasAuthError(f"Auth failed: {message}")
-        if "登录" in message and "成功" not in message:
-            raise ZrGasAuthError(f"Auth failed: {message}")
-
-        raise ZrGasApiError(f"API error (status={status}): {message}")
+    # ── Session / token ────────────────────────────────────────────
 
     async def init_request(self, user_id: str) -> bool:
-        """Send an initialization / buried-point event request.
+        """Send a buried-point init request (registers the session).
 
-        This is required before other API calls — it registers the session.
-        The request body is a URL-encoded string:
-        "appUseType=0&clickType=3&eventType=1&channelType=0&userId={userId}"
-
-        Args:
-            user_id: User identifier for the session.
-
-        Returns:
-            True if initialization was successful.
+        参数对齐小程序真实行为（借鉴 hazr 抓包: clickType=10, channelType=6）。
+        Best-effort — failure is logged and ignored.
         """
         url = f"{BASE_URL}{ENDPOINT_INIT}"
         data = {
             "appUseType": "0",
-            "clickType": "3",
+            "clickType": "10",
             "eventType": "1",
-            "channelType": "0",
+            "channelType": "6",
             "userId": user_id,
         }
 
@@ -458,41 +535,24 @@ class ZrGasAPI:
             return False
 
     async def check_token(self) -> dict[str, Any]:
-        """Validate the access token and retrieve user information.
+        """Validate the access token via POST /wisdom/auth/checkMasInfo.
 
-        POST to /wisdom/auth/checkMasInfo with JSON body {}.
-        Confirmed response: {"message": "token有效", "status": 1, ...}
-
-        Returns:
-            API response containing userId and other account info.
-
-        Raises:
-            ZrGasAuthError: If the token is invalid or expired.
+        Verified live: reachable; requires accessToken/userId headers.
         """
         url = f"{BASE_URL}{ENDPOINT_CHECK_TOKEN}"
-        data = {}
+        result = await self._post(url, {}, as_json=True)
 
-        result = await self._post(url, data, as_json=True)
-
-        # Confirmed: response has message "token有效" when valid
         if result.get("message") == "token有效" or result.get("status") in (1, "1"):
             return result
 
         raise ZrGasAuthError(f"Token validation failed: {result.get('message', 'unknown')}")
 
+    # ── Data queries ───────────────────────────────────────────────
+
     async def get_bind_gas_cust_list(self, user_id: str) -> list[ZrGasCustomer]:
-        """Get list of gas customer accounts bound to the user.
+        """Get bound gas customer accounts. Signature: md5(userId+salt+ts).
 
-        Signature: md5(userId + salt + timeStamp)
-
-        Args:
-            user_id: User identifier obtained from check_token / headers.
-
-        Returns:
-            List of ZrGasCustomer instances.
-
-        Raises:
-            ZrGasApiError: On API errors.
+        state="1" 参数对齐小程序真实请求（借鉴 hazr 抓包）。
         """
         url = f"{BASE_URL}{ENDPOINT_GET_CUSTOMERS}"
         timestamp = self._get_timestamp()
@@ -500,12 +560,11 @@ class ZrGasAPI:
 
         data = {
             "userId": user_id,
+            "state": "1",
             "timeStamp": timestamp,
             "signature": signature,
         }
-        headers = {
-            "userId": user_id,
-        }
+        headers = {"userId": user_id}
 
         result = await self._post(url, data, headers=headers)
 
@@ -513,42 +572,22 @@ class ZrGasAPI:
         if isinstance(items, dict):
             items = [items]
 
-        customers: list[ZrGasCustomer] = []
-        for item in items:
-            customers.append(
-                ZrGasCustomer(
-                    cust_code=item.get("custCode", ""),
-                    cust_name=item.get("custName", ""),
-                )
+        return [
+            ZrGasCustomer(
+                cust_code=item.get("custCode", ""),
+                cust_name=item.get("custName", ""),
             )
+            for item in items
+        ]
 
-        return customers
+    async def get_cust_info(self, cust_code: str, cust_name: str) -> ZrGasCustomerDetail:
+        """Query customer detail. Signature: md5(custCode+salt+ts).
 
-    async def get_cust_info(
-        self, cust_code: str, cust_name: str
-    ) -> ZrGasCustomerDetail:
-        """Query detailed information for a specific gas customer.
-
-        Signature: md5(custCode + salt + timeStamp)
-
-        Confirmed response fields from packet capture:
-        - countMoney: 余额 (account balance)
-        - newCountMoney: 新余额
-        - address: 用气地址
-        - custCode: 燃气编号
-        - custName: 客户姓名 (masked, e.g. "***")
-        - oweMoney: 欠费金额
-        - awardMoney: 赠送金额
-
-        Args:
-            cust_code: Customer code (燃气编号).
-            cust_name: Customer name with mask (e.g. "张*").
-
-        Returns:
-            ZrGasCustomerDetail with address and balance info.
-
-        Raises:
-            ZrGasApiError: On API errors.
+        在线端字段映射（实机抓包确认）:
+        - countMoney/newCountMoney → 余额 balance
+        - address / oweMoney / awardMoney / lastRecord / qtyMeterBalance
+          / purchTimes / lastRecordTime / meterNo / meterFormName / cardNo
+          / compName / custStatus / fee
         """
         url = f"{BASE_URL}{ENDPOINT_GET_CUSTOMER_INFO}"
         timestamp = self._get_timestamp()
@@ -565,40 +604,20 @@ class ZrGasAPI:
 
         info = result.get("data") or {}
 
-        # Confirmed: balance is in "countMoney" field
         balance_str = (
-            info.get("countMoney")
-            or info.get("newCountMoney")
-            or info.get("balance")
-            or "0"
+            info.get("countMoney") or info.get("newCountMoney") or info.get("balance") or "0"
         )
-        try:
-            balance = float(balance_str)
-        except (ValueError, TypeError):
-            balance = 0.0
-
-        # Extract additional fields from API response
-        def _float(val, default=0.0):
-            try:
-                return float(val) if val is not None else default
-            except (ValueError, TypeError):
-                return default
-
-        def _int(val, default=0):
-            try:
-                return int(float(val)) if val is not None else default
-            except (ValueError, TypeError):
-                return default
 
         return ZrGasCustomerDetail(
             cust_code=info.get("custCode", cust_code),
             cust_name=info.get("custName", cust_name),
             cust_address=info.get("address", ""),
-            balance=balance,
-            owe_money=_float(info.get("oweMoney")),
-            last_record=_float(info.get("lastRecord")),
-            qty_meter_balance=_float(info.get("qtyMeterBalance")),
-            purch_times=_int(info.get("purchTimes")),
+            balance=_to_float(balance_str),
+            owe_money=_to_float(info.get("oweMoney")),
+            award_money=_to_float(info.get("awardMoney")),
+            last_record=_to_float(info.get("lastRecord")),
+            qty_meter_balance=_to_float(info.get("qtyMeterBalance")),
+            purch_times=_to_int(info.get("purchTimes")),
             last_record_time=info.get("lastRecordTime", ""),
             meter_no=info.get("meterNo", ""),
             meter_form_name=info.get("meterFormName", ""),
@@ -614,20 +633,10 @@ class ZrGasAPI:
         start_time: str,
         end_time: str,
     ) -> list[ZrGasBill]:
-        """Query billing/payment records for a customer within a time range.
+        """Query billing records in a YYYYMM range.
 
-        Signature: md5(custCode + salt + timeStamp)
-
-        Args:
-            cust_code: Customer code.
-            start_time: Start period in YYYYMM format.
-            end_time: End period in YYYYMM format.
-
-        Returns:
-            List of ZrGasBill instances.
-
-        Raises:
-            ZrGasApiError: On API errors.
+        Signature: md5(custCode+salt+ts). Fields: recordMonth / curQty /
+        receivable / price.
         """
         url = f"{BASE_URL}{ENDPOINT_GET_BILLS}"
         timestamp = self._get_timestamp()
@@ -642,59 +651,182 @@ class ZrGasAPI:
         }
 
         result = await self._post(url, data)
+        return _parse_bill_items(result.get("data"))
+
+
+class ZrGasPayApi(ZrGasBaseApi):
+    """缴费端 API 客户端（原 zr-gas，仅支持 Token 导入）。
+
+    2026-10 实测：sendSmsCode / verifySmsCode 登录端点被网关在认证层
+    拦截（status=255，带完整小程序请求头亦然），短信登录不可用。
+    请从缴费小程序抓包获取 accessToken + userId 后通过 Token 导入使用。
+
+    字段映射与在线端的差异（基于原抓包）:
+    - 余额 balance = qtyBalance（在线端为 countMoney）
+    - 额外字段: newOweMoney / price(单价) / maxGas / custType
+    - getMeterInfo 提供表具富化: ventDate / barCode / meterloc / cardType
+    - 账单走 queryBillHistory（按年查询），而非 getCustomerMoneyList
+    """
+
+    source = SOURCE_PAY
+
+    def _extra_headers(self) -> dict[str, str]:
+        """缴费端小程序附加请求头（accessFrom 等，基于抓包）。"""
+        return dict(PAY_EXTRA_HEADERS)
+
+    # ── Token ──────────────────────────────────────────────────────
+
+    async def check_token(self) -> dict[str, Any]:
+        """Validate the token via getBindGasCustList.
+
+        The login endpoints are gateway-blocked, so a successful
+        (non-255) account discovery doubles as token validation.
+        Raises ZrGasAuthError when the token is rejected.
+        """
+        customers = await self.get_bind_gas_cust_list(self._user_id)
+        return {"message": "token有效", "customers": len(customers)}
+
+    # ── Data queries ───────────────────────────────────────────────
+
+    async def get_bind_gas_cust_list(self, user_id: str) -> list[ZrGasCustomer]:
+        """Get bound gas customer accounts (shared endpoint with mp)."""
+        url = f"{BASE_URL}{ENDPOINT_GET_CUSTOMERS}"
+        timestamp = self._get_timestamp()
+        signature = self._generate_signature(user_id, timestamp)
+
+        data = {
+            "userId": user_id,
+            "state": "1",
+            "timeStamp": timestamp,
+            "signature": signature,
+        }
+        headers = {"userId": user_id}
+
+        result = await self._post(url, data, headers=headers)
 
         items = result.get("data") or []
         if isinstance(items, dict):
-            # May be a single record
             items = [items]
 
+        return [
+            ZrGasCustomer(
+                cust_code=item.get("custCode", ""),
+                cust_name=item.get("custName", ""),
+            )
+            for item in items
+        ]
+
+    async def get_cust_info(self, cust_code: str, cust_name: str = "") -> ZrGasCustomerDetail:
+        """Query customer detail with pay-source field mapping.
+
+        缴费端字段映射: balance = qtyBalance（缺失时回退 countMoney）。
+        """
+        url = f"{BASE_URL}{ENDPOINT_GET_CUSTOMER_INFO}"
+        timestamp = self._get_timestamp()
+        signature = self._generate_signature(cust_code, timestamp)
+
+        data = {
+            "custCode": cust_code,
+            "custName": cust_name,
+            "timeStamp": timestamp,
+            "signature": signature,
+        }
+
+        result = await self._post(url, data)
+
+        info = result.get("data") or {}
+
+        balance_str = info.get("qtyBalance") or info.get("countMoney") or info.get("balance") or "0"
+
+        return ZrGasCustomerDetail(
+            cust_code=info.get("custCode", cust_code),
+            cust_name=info.get("custName", cust_name),
+            cust_address=info.get("address", ""),
+            balance=_to_float(balance_str),
+            owe_money=_to_float(info.get("oweMoney")),
+            new_owe_money=_to_float(info.get("newOweMoney")),
+            award_money=_to_float(info.get("awardMoney")),
+            gas_price=_to_float(info.get("price")),
+            max_gas=_to_float(info.get("maxGas")),
+            cust_type=info.get("custType", ""),
+            last_record=_to_float(info.get("lastRecord")),
+            qty_meter_balance=_to_float(info.get("qtyMeterBalance")),
+            purch_times=_to_int(info.get("purchTimes")),
+            last_record_time=info.get("lastRecordTime", ""),
+            meter_no=info.get("meterNo", ""),
+            meter_form_name=info.get("meterFormName", ""),
+            card_no=info.get("cardNo", ""),
+            comp_name=info.get("compName", ""),
+            cust_status=info.get("custStatus", ""),
+            fee=info.get("fee", ""),
+        )
+
+    async def get_customer_money_list(
+        self,
+        cust_code: str,
+        start_time: str,
+        end_time: str,
+    ) -> list[ZrGasBill]:
+        """Query bills via queryBillHistory (year-by-year, pay source).
+
+        The pay source has no period-range endpoint; the YYYYMM range is
+        converted to a year span and each year queried separately.
+        """
+        try:
+            start_year = int(start_time[:4])
+            end_year = int(end_time[:4])
+        except (ValueError, IndexError):
+            start_year = end_year = int(end_time[:4]) if end_time[:4].isdigit() else 2026
+
         bills: list[ZrGasBill] = []
-        for item in items:
-            # Fields from the older API reference (zrhsh.com):
-            # recordMonth, curQty (用量), receivable (应收), received (已收)
-            try:
-                usage_volume = float(
-                    item.get("curQty")
-                    or item.get("usageVolume")
-                    or item.get("gasVolume")
-                    or 0
-                )
-            except (ValueError, TypeError):
-                usage_volume = 0.0
+        for year in range(start_year, end_year + 1):
+            url = f"{BASE_URL}{ENDPOINT_PAY_BILL_HISTORY}"
+            timestamp = self._get_timestamp()
+            signature = self._generate_signature(f"{cust_code}{year}", timestamp)
 
-            try:
-                usage_amount = float(
-                    item.get("receivable")
-                    or item.get("usageAmount")
-                    or item.get("payFee")
-                    or 0
-                )
-            except (ValueError, TypeError):
-                usage_amount = 0.0
+            data = {
+                "custCode": cust_code,
+                "year": str(year),
+                "timeStamp": timestamp,
+                "signature": signature,
+            }
 
-            try:
-                unit_price = float(
-                    item.get("price")
-                    or item.get("unitPrice")
-                    or 0
-                )
-            except (ValueError, TypeError):
-                unit_price = 0.0
-
-            period = (
-                item.get("recordMonth")
-                or item.get("period")
-                or item.get("billingCycle")
-                or ""
-            )
-
-            bills.append(
-                ZrGasBill(
-                    period=period,
-                    usage_volume=usage_volume,
-                    usage_amount=usage_amount,
-                    unit_price=unit_price,
-                )
-            )
+            result = await self._post(url, data)
+            bills.extend(_parse_bill_items(result.get("data")))
 
         return bills
+
+
+def _parse_bill_items(items: Any) -> list[ZrGasBill]:
+    """Parse a bill list payload shared by both sources.
+
+    Field fallbacks cover both programs' captures:
+    period: recordMonth / period / billingCycle
+    volume: curQty / usageVolume / gasVolume
+    amount: receivable / usageAmount / payFee
+    price:   price / unitPrice
+    """
+    if not items:
+        return []
+    if isinstance(items, dict):
+        items = [items]
+
+    bills: list[ZrGasBill] = []
+    for item in items:
+        period = item.get("recordMonth") or item.get("period") or item.get("billingCycle") or ""
+        # Normalize period to YYYYMM (strip separators if present)
+        period = period.replace("-", "").replace("/", "")[:6]
+
+        bills.append(
+            ZrGasBill(
+                period=period,
+                usage_volume=_to_float(
+                    item.get("curQty") or item.get("usageVolume") or item.get("gasVolume")
+                ),
+                usage_amount=_to_float(
+                    item.get("receivable") or item.get("usageAmount") or item.get("payFee")
+                ),
+                unit_price=_to_float(item.get("price") or item.get("unitPrice")),
+            )
+        )
+    return bills

@@ -4,16 +4,14 @@ Uses the SensorEntityDescription pattern (inspired by ha_hfcrgas) to
 declaratively define all sensors. Adding a new sensor only requires
 adding a new description entry — no new class needed.
 
-Each bound gas customer account gets its own Device grouping:
-- Balance sensor: Current account balance (CNY)
-- Monthly usage sensor: Current month gas usage (m³)
-- Monthly cost sensor: Current month cost (CNY)
-- Owe money sensor: Outstanding debt (CNY)
-- Meter reading sensor: Last meter reading
-- Gas volume balance sensor: Remaining gas volume
-- Purchase count sensor: Number of gas purchases
-- Last reading date sensor: Date of last meter reading
-- Annual usage sensor: Yearly accumulated gas usage with tier info (m³)
+Sensors are shared across both data sources (在线端/缴费端); a source
+that cannot provide a field yields ``unknown`` for that sensor. Each
+bound gas customer account gets its own Device grouping:
+
+- Balance / monthly usage / monthly cost / owe money / award money
+- Gas price / max purchase volume
+- Meter reading / gas volume balance / purchase count / last reading date
+- Annual usage with tier info and monthly/yearly statistics
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import homeassistant.util.dt as dt_util
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -34,10 +33,9 @@ from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-import homeassistant.util.dt as dt_util
 
 from . import ZrGasDataUpdateCoordinator
-from .const import DOMAIN
+from .const import DOMAIN, SOURCE_PAY
 from .models import ZrGasDeviceData
 
 
@@ -52,17 +50,13 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     value = value.strip()
     if not value:
         return None
-    try:
-        # Try full datetime format first
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                parsed = datetime.strptime(value, fmt)
-            except ValueError:
-                continue
-            # Attach local timezone (HA default for naive datetimes)
-            return parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
-    except Exception:
-        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+        # Attach local timezone (HA default for naive datetimes)
+        return parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
     return None
 
 
@@ -81,7 +75,7 @@ class ZrGasSensorEntityDescription(SensorEntityDescription):
 # Shared device attributes for all sensors
 def _device_attributes(data: ZrGasDeviceData) -> dict[str, Any]:
     """Return common device attributes shared across all sensors."""
-    return {
+    attrs: dict[str, Any] = {
         "cust_code": data.cust_code,
         "cust_name": data.cust_name,
         "cust_address": data.cust_address,
@@ -91,7 +85,20 @@ def _device_attributes(data: ZrGasDeviceData) -> dict[str, Any]:
         "card_no": data.card_no,
         "fee": data.fee,
         "cust_status": data.cust_status,
+        "source": data.source,
     }
+    # 表具富化字段（缴费端 / 在线端 token 调通 getMeterInfo 时提供）
+    if data.card_type:
+        attrs["card_type"] = data.card_type
+    if data.vent_date:
+        attrs["vent_date"] = data.vent_date
+    if data.bar_code:
+        attrs["bar_code"] = data.bar_code
+    if data.meter_loc:
+        attrs["meter_loc"] = data.meter_loc
+    if data.cust_type:
+        attrs["cust_type"] = data.cust_type
+    return attrs
 
 
 def _stats_attributes(data: ZrGasDeviceData) -> dict[str, Any]:
@@ -158,6 +165,38 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         icon="mdi:alert-circle-outline",
         suggested_display_precision=2,
         value_fn=lambda data: data.owe_money,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "new_owe_money": data.new_owe_money,
+        },
+    ),
+    ZrGasSensorEntityDescription(
+        key="award_money",
+        translation_key="award_money",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement="CNY",
+        icon="mdi:gift-outline",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.award_money or None,
+        attributes_fn=lambda data: _device_attributes(data),
+    ),
+    ZrGasSensorEntityDescription(
+        key="gas_price",
+        translation_key="gas_price",
+        native_unit_of_measurement="元/m³",
+        icon="mdi:tag-outline",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.gas_price or None,
+        attributes_fn=lambda data: _device_attributes(data),
+    ),
+    ZrGasSensorEntityDescription(
+        key="max_gas",
+        translation_key="max_gas",
+        device_class=SensorDeviceClass.GAS,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        icon="mdi:arrow-expand-vertical",
+        suggested_display_precision=0,
+        value_fn=lambda data: data.max_gas or None,
         attributes_fn=lambda data: _device_attributes(data),
     ),
     ZrGasSensorEntityDescription(
@@ -204,7 +243,30 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
             "last_record": data.last_record,
         },
     ),
-    # ── 新增：年度累计用气量传感器 ────────────────────────────
+    # ── 最近缴费（借鉴 hazr 的 getPaymentLogForHsh 端点） ──────────
+    ZrGasSensorEntityDescription(
+        key="last_payment",
+        translation_key="last_payment",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement="CNY",
+        icon="mdi:receipt-text-check",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.last_payment or None,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "last_payment_time": data.last_payment_time,
+            "payment_history": [
+                {
+                    "time": p.pay_time,
+                    "amount": round(p.amount, 2),
+                    "qty": round(p.qty, 2),
+                    "type": p.pay_type,
+                }
+                for p in data.payment_history[:12]
+            ],
+        },
+    ),
+    # ── 年度累计用气量传感器（阶梯周期内累计） ────────────────────
     ZrGasSensorEntityDescription(
         key="annual_usage",
         translation_key="annual_usage",
@@ -237,15 +299,30 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
         description: ZrGasSensorEntityDescription,
         cust_code: str,
         cust_code_short: str,
+        source: str,
     ) -> None:
-        """Initialize the sensor entity."""
+        """Initialize the sensor entity.
+
+        Args:
+            coordinator: Data update coordinator for this customer.
+            description: Sensor entity description.
+            cust_code: Full customer code.
+            cust_code_short: Short customer code for device naming.
+            source: Data source (在线端 mp / 缴费端 pay).
+        """
         super().__init__(coordinator)
         self.entity_description = description
         self._cust_code = cust_code
-        self._attr_unique_id = f"zr_gas_{cust_code}_{description.key}"
+        self._source = source
+        # 在线端沿用历史 unique_id（升级不换实体）；缴费端加来源前缀避免冲突
+        id_prefix = "zr_gas_pay_" if source == SOURCE_PAY else "zr_gas_"
+        self._attr_unique_id = f"{id_prefix}{cust_code}_{description.key}"
+        device_key = f"pay_{cust_code}" if source == SOURCE_PAY else cust_code
+        source_label = "缴费端 " if source == SOURCE_PAY else ""
+        self._device_key = device_key
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, cust_code)},
-            "name": f"中燃燃气 {cust_code_short}",
+            "identifiers": {(DOMAIN, device_key)},
+            "name": f"中燃燃气 {source_label}{cust_code_short}",
             "manufacturer": "中燃在线",
             "model": "在线账户",
         }
@@ -253,12 +330,7 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
     @property
     def device_info(self) -> dict[str, Any]:
         """Return dynamic device info with live data from coordinator."""
-        info = {
-            "identifiers": {(DOMAIN, self._cust_code)},
-            "name": f"中燃燃气 {self._cust_code[-4:]}",
-            "manufacturer": "中燃在线",
-            "model": "在线账户",
-        }
+        info = dict(self._attr_device_info)
         if self.coordinator.data is not None:
             data = self.coordinator.data
             if data.comp_name:
@@ -266,7 +338,11 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
             if data.meter_form_name:
                 info["model"] = data.meter_form_name
             if data.cust_address:
-                info["name"] = f"中燃燃气 {data.cust_address[:20]}"
+                info["name"] = (
+                    f"中燃燃气 "
+                    f"{'缴费端 ' if self._source == SOURCE_PAY else ''}"
+                    f"{data.cust_address[:20]}"
+                )
             if data.meter_no:
                 info["sw_version"] = f"表号: {data.meter_no}"
             if data.card_no:
@@ -297,9 +373,8 @@ async def async_setup_entry(
 ) -> None:
     """Set up the 中燃在线 sensor platform."""
     entry_data = hass.data[DOMAIN][entry.entry_id]
-    coordinators: dict[str, ZrGasDataUpdateCoordinator] = entry_data.get(
-        "coordinators", {}
-    )
+    coordinators: dict[str, ZrGasDataUpdateCoordinator] = entry_data.get("coordinators", {})
+    source = entry_data.get("source", entry.data.get("source", "mp"))
 
     entities: list[SensorEntity] = []
 
@@ -313,6 +388,7 @@ async def async_setup_entry(
                     description=description,
                     cust_code=cust_code,
                     cust_code_short=cust_code_short,
+                    source=source,
                 )
             )
 

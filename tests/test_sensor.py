@@ -2,13 +2,10 @@
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from unittest.mock import patch
-
-import pytest
-
 
 # Import _parse_timestamp directly by reading the function source
 # and executing it in isolation, since sensor.py imports homeassistant
+
 
 def _parse_timestamp_isolated(value):
     """Standalone copy of _parse_timestamp for testing without HA deps."""
@@ -31,7 +28,6 @@ def _parse_timestamp_isolated(value):
 
 
 class TestParseTimestamp:
-
     def test_full_datetime(self):
         result = _parse_timestamp_isolated("2026-04-21 10:30:00")
         expected = datetime(2026, 4, 21, 10, 30, 0, tzinfo=ZoneInfo("Asia/Shanghai"))

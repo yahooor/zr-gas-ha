@@ -1,11 +1,7 @@
 """Tests for zr_gas.models — TierConfig and dataclasses."""
 
-import math
-
 import pytest
-
-from zr_gas.models import TierConfig, ZrGasBill, MonthlyStat, YearlyStat
-
+from zr_gas.models import MonthlyStat, YearlyStat, ZrGasBill
 
 # ── TierConfig.get_tier_info ──────────────────────────────────────────
 

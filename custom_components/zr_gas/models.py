@@ -1,4 +1,12 @@
-"""Data models for the 中燃在线 (ZR Gas) integration."""
+"""Data models for the 中燃在线 (ZR Gas) integration.
+
+字段取自两个数据来源的并集；某一来源不提供的字段保持默认值，
+由各 API 客户端按自己的字段映射填充：
+
+- 在线端 (mp): balance=countMoney, 无 meter 富化字段
+- 缴费端 (pay): balance=qtyBalance, 含 price/maxGas/custType 及表具
+  富化字段（ventDate/barCode/meterloc/cardType）
+"""
 
 from __future__ import annotations
 
@@ -9,7 +17,7 @@ from dataclasses import dataclass, field
 class ZrGasCustomer:
     """绑定的燃气客户摘要信息。
 
-    从 getBindGasCustList 接口返回。
+    从 getBindGasCustList 接口返回（两端点相同）。
     """
 
     cust_code: str
@@ -18,9 +26,10 @@ class ZrGasCustomer:
 
 @dataclass
 class ZrGasCustomerDetail:
-    """客户详细信息。
+    """客户详细信息（两端字段归一化后的并集）。
 
-    从 findCustInfoByCustCodeAndCustName 接口返回。
+    由各来源的 API 客户端从 findCustInfoByCustCodeAndCustName
+    响应中按自己的映射填充。
     """
 
     cust_code: str
@@ -28,6 +37,11 @@ class ZrGasCustomerDetail:
     cust_address: str
     balance: float
     owe_money: float = 0.0
+    new_owe_money: float = 0.0
+    award_money: float = 0.0
+    gas_price: float = 0.0
+    max_gas: float = 0.0
+    cust_type: str = ""
     last_record: float = 0.0
     qty_meter_balance: float = 0.0
     purch_times: int = 0
@@ -41,16 +55,42 @@ class ZrGasCustomerDetail:
 
 
 @dataclass
+class ZrGasMeterInfo:
+    """燃气表富化信息（仅缴费端 getMeterInfo 提供）。"""
+
+    meter_no: str = ""
+    card_type: str = ""
+    card_no: str = ""
+    vent_date: str = ""
+    bar_code: str = ""
+    meter_loc: str = ""
+
+
+@dataclass
 class ZrGasBill:
     """单条缴费/账单记录。
 
-    从 getCustomerMoneyList 接口返回。
+    在线端来自 getCustomerMoneyList，缴费端来自 queryBillHistory。
     """
 
     period: str  # 账期，格式 YYYYMM
     usage_volume: float  # 用气量 (m³)
     usage_amount: float  # 费用金额 (CNY)
     unit_price: float  # 单价 (CNY/m³)
+
+
+@dataclass
+class ZrGasPayment:
+    """单条缴费（充值）记录。
+
+    来自 getPaymentLogForHsh（借鉴 hazr 项目）。字段基于 hazr 抓包：
+    payTime / amount / payQty / payType 等，解析时做兜底。
+    """
+
+    pay_time: str = ""  # 缴费时间
+    amount: float = 0.0  # 缴费金额 (CNY)
+    qty: float = 0.0  # 购气量 (m³)
+    pay_type: str = ""  # 缴费方式
 
 
 @dataclass
@@ -90,9 +130,7 @@ class TierConfig:
         else:
             return (3, self.tier_3_price, float("inf"))
 
-    def calculate_usage_from_cost(
-        self, start_usage: float, cost: float
-    ) -> float:
+    def calculate_usage_from_cost(self, start_usage: float, cost: float) -> float:
         """根据费用反算用气量（处理跨阶梯场景）。
 
         当 API 只返回费用 (cost) 但不返回气量时，
@@ -113,9 +151,7 @@ class TierConfig:
             if remaining_cost <= 0.001:
                 break
 
-            _tier, current_price, remaining_in_tier = self.get_tier_info(
-                current_base
-            )
+            _tier, current_price, remaining_in_tier = self.get_tier_info(current_base)
 
             if current_price <= 0:
                 break
@@ -157,11 +193,13 @@ class YearlyStat:
 
 @dataclass
 class ZrGasDeviceData:
-    """聚合后的设备数据，用于传感器状态更新。
+    """聚合后的设备数据（两个来源归一化），用于传感器状态更新。
 
-    由 Coordinator 组合 customerDetail 和 bills 信息生成。
+    由 Coordinator 组合 customerDetail / meterInfo / bills 信息生成。
+    某一来源不提供的字段保持默认值。
     """
 
+    source: str  # 数据来源: SOURCE_MP / SOURCE_PAY
     balance: float  # 账户余额 (CNY)
     cust_code: str
     cust_name: str
@@ -171,6 +209,11 @@ class ZrGasDeviceData:
     period: str  # 当前账期 YYYYMM
     unit_price: float  # 当月单价 (CNY/m³)
     owe_money: float = 0.0
+    new_owe_money: float = 0.0
+    award_money: float = 0.0
+    gas_price: float = 0.0
+    max_gas: float = 0.0
+    cust_type: str = ""
     last_record: float = 0.0
     qty_meter_balance: float = 0.0
     purch_times: int = 0
@@ -181,6 +224,15 @@ class ZrGasDeviceData:
     comp_name: str = ""
     cust_status: str = ""
     fee: str = ""
+    # 表具富化信息（仅缴费端）
+    card_type: str = ""
+    vent_date: str = ""
+    bar_code: str = ""
+    meter_loc: str = ""
+    # 缴费记录（最近一次金额 + 历史列表）
+    last_payment: float = 0.0  # 最近一次缴费金额 (CNY)
+    last_payment_time: str = ""
+    payment_history: list[ZrGasPayment] = field(default_factory=list)
     # 阶梯气价
     annual_usage: float = 0.0  # 年度累计用气量 (m³)
     current_tier: int = 1  # 当前阶梯 1/2/3

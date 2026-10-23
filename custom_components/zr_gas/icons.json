@@ -5,10 +5,14 @@
       "monthly_usage": "mdi:fire-circle",
       "monthly_cost": "mdi:currency-cny",
       "owe_money": "mdi:alert-circle",
+      "award_money": "mdi:gift-outline",
+      "gas_price": "mdi:tag-outline",
+      "max_gas": "mdi:arrow-expand-vertical",
       "last_record": "mdi:gauge",
       "qty_meter_balance": "mdi:gas-cylinder",
       "purch_times": "mdi:counter",
       "last_record_time": "mdi:clock-outline",
+      "last_payment": "mdi:receipt-text-check",
       "annual_usage": "mdi:chart-line"
     }
   }

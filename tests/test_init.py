@@ -14,10 +14,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from zr_gas.models import TierConfig, ZrGasBill, MonthlyStat
-
 # Import the __init__ module — HA mocks are set up in conftest.py
 import zr_gas
+from zr_gas.models import MonthlyStat, TierConfig, ZrGasBill
+
 importlib.reload(zr_gas)
 
 _calculate_monthly_stats = zr_gas._calculate_monthly_stats
@@ -30,7 +30,6 @@ _calculate_annual_usage = zr_gas._calculate_annual_usage
 
 
 class TestCalculateMonthlyStats:
-
     def test_empty_list(self):
         result = _calculate_monthly_stats([])
         assert result == []
@@ -93,7 +92,6 @@ class TestCalculateMonthlyStats:
 
 
 class TestCalculateYearlyStats:
-
     def test_empty_list(self):
         result = _calculate_yearly_stats([])
         assert result == []
@@ -126,7 +124,6 @@ class TestCalculateYearlyStats:
 
 
 class TestCalculateTierCycleStart:
-
     def test_jan_1_mid_year(self):
         fake_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
@@ -187,7 +184,6 @@ class TestCalculateTierCycleStart:
 
 
 class TestCalculateAnnualUsage:
-
     def test_basic_accumulation(self):
         monthly = [
             MonthlyStat(month="2026-01", gas_num=50.0, gas_cost=149.5),
@@ -197,7 +193,9 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="01-01")
         fake_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, tier_price, cycle_start = _calculate_annual_usage(monthly, tier_config)
+            annual_usage, tier_num, tier_price, cycle_start = _calculate_annual_usage(
+                monthly, tier_config
+            )
 
         assert annual_usage == pytest.approx(100.0)
         assert tier_num == 1
@@ -208,7 +206,9 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="01-01")
         fake_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, tier_price, cycle_start = _calculate_annual_usage([], tier_config)
+            annual_usage, tier_num, tier_price, cycle_start = _calculate_annual_usage(
+                [], tier_config
+            )
 
         assert annual_usage == 0.0
         assert tier_num == 1
@@ -226,8 +226,43 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="07-01")
         fake_now = datetime(2026, 3, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, tier_price, cycle_start = _calculate_annual_usage(monthly, tier_config)
+            annual_usage, tier_num, _tier_price, cycle_start = _calculate_annual_usage(
+                monthly, tier_config
+            )
 
         assert annual_usage == pytest.approx(100.0)  # 30+50+20, excludes 2025-06
         assert tier_num == 1
         assert cycle_start == "2025-07-01"
+
+
+# ── build_api_client（双数据源客户端工厂） ────────────────────────────
+
+
+class TestBuildApiClient:
+    """build_api_client must map source → correct API client class."""
+
+    def test_mp_source(self):
+        from zr_gas import build_api_client
+        from zr_gas.api import ZrGasMpApi
+
+        api = build_api_client(None, "mp", "tok", "uid", "mas")
+        assert isinstance(api, ZrGasMpApi)
+        assert api.access_token == "tok"
+        assert api.x_mas_app_info == "mas"
+
+    def test_pay_source(self):
+        from zr_gas import build_api_client
+        from zr_gas.api import ZrGasPayApi
+
+        api = build_api_client(None, "pay", "tok", "uid", "mas")
+        assert isinstance(api, ZrGasPayApi)
+        assert api.access_token == "tok"
+        assert api.x_mas_app_info == ""  # 缴费端不使用 x-mas-app-info
+
+    def test_legacy_entry_without_source_defaults_to_mp(self):
+        """旧版配置条目没有 source 字段 → 默认在线端（向后兼容）."""
+        from zr_gas import build_api_client
+        from zr_gas.api import ZrGasMpApi
+
+        api = build_api_client(None, "mp", "tok", "uid")
+        assert isinstance(api, ZrGasMpApi)

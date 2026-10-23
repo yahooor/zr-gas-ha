@@ -1,8 +1,0 @@
-# Quality Scale tracking for the 中燃在线 (ZR Gas) integration
-# https://developers.home-assistant.io/docs/core/integration-quality-scale/
-
-custom_components:
-  zr_gas:
-    quality_scale: bronze
-    # Achieved: Bronze
-    # Next target: Silver (add error recovery, reauth, troubleshooting docs)

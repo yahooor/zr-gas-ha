@@ -3,55 +3,56 @@
     "step": {
       "user": {
         "title": "ZR Gas Login",
-        "description": "Choose login method.\nSMS login requires captcha and SMS verification; Token import lets you paste credentials directly.",
+        "description": "Choose a data source and authentication method.\n\nOnline (mp): SMS login (recommended, no packet capture needed) or token import.\nPayment (pay): token import only (its SMS login endpoints are blocked server-side).",
         "data": {
-          "auth_method": "Login Method",
-          "mobile": "Mobile Number"
+          "source": "Data source",
+          "auth_method": "Authentication method",
+          "mobile": "Mobile number"
         }
       },
       "token": {
         "title": "Token Import",
-        "description": "Paste pre-obtained login credentials (from API or packet capture). Required: Access Token and User ID.",
+        "description": "Paste pre-obtained credentials (from API or packet capture). Required: Access Token and User ID.",
         "data": {
           "access_token": "Access Token (required)",
           "user_id": "User ID (required)",
           "x_mas_app_info": "X-MAS-App-Info",
-          "mobile": "Mobile Number"
+          "mobile": "Mobile number"
         }
       },
       "captcha": {
-        "title": "Captcha Verification",
-        "description": "1. {link_left}Click here to view captcha image{link_right} (opens in new tab)\n2. Read the code and enter it below\n3. Submit to send an SMS verification code",
+        "title": "Captcha",
+        "description": "1. {link_left}Click here to open the captcha image{link_right} (in a new tab)\n2. Read the code and enter it below\n3. Submit to send the SMS code",
         "data": {
-          "captcha_code": "Captcha Code"
+          "captcha_code": "Captcha code"
         }
       },
       "sms_code": {
-        "title": "SMS Verification",
-        "description": "An SMS verification code has been sent to your phone. Please enter it to complete login.",
+        "title": "SMS Code",
+        "description": "An SMS verification code has been sent to your phone. Enter it to finish login.",
         "data": {
-          "sms_code": "SMS Code"
+          "sms_code": "SMS verification code"
         }
       },
       "discover": {
         "title": "Account Discovery",
-        "description": "Found {count} gas account(s)"
+        "description": "Discovered {count} gas account(s)"
       }
     },
     "error": {
       "token_required": "Access Token and User ID are required",
-      "invalid_mobile": "Please enter a valid 11-digit mobile number",
-      "captcha_required": "Please enter the captcha code",
-      "sms_code_required": "Please enter the SMS code",
-      "sms_send_failed": "Failed to send SMS code. Please check if the captcha code is correct.",
-      "invalid_sms_code": "SMS code is incorrect or expired",
-      "invalid_token": "Authentication failed. Please login again.",
-      "connection_error": "Connection failed. Please check your network.",
+      "invalid_mobile": "Enter a valid 11-digit mobile number",
+      "captcha_required": "Enter the captcha code",
+      "sms_code_required": "Enter the SMS verification code",
+      "sms_send_failed": "Failed to send the code — check the captcha",
+      "invalid_sms_code": "SMS code is wrong or expired",
+      "invalid_token": "Authentication failed, please log in again",
+      "connection_error": "Connection failed, check your network",
       "no_accounts": "No bound gas accounts found",
       "api_error": "API call failed"
     },
     "abort": {
-      "already_configured": "This mobile number is already configured",
+      "already_configured": "This mobile number is already configured for this data source",
       "reauth_successful": "Re-authentication successful"
     }
   },
@@ -59,17 +60,17 @@
     "step": {
       "init": {
         "title": "ZR Gas Options",
-        "description": "Adjust data refresh, balance alert, bill query range and tiered pricing settings",
+        "description": "Adjust refresh interval, balance alert, bill query range and tiered pricing",
         "data": {
-          "update_interval": "Refresh Interval (seconds)",
-          "balance_threshold": "Balance Alert Threshold (CNY)",
-          "bill_query_years": "Bill Query Years",
-          "yearly_step_2_start_volume": "Tier 2 Start Volume (m\u00b3)",
-          "yearly_step_3_start_volume": "Tier 3 Start Volume (m\u00b3)",
-          "year_step_1_price": "Tier 1 Price (CNY/m\u00b3)",
-          "year_step_2_price": "Tier 2 Price (CNY/m\u00b3)",
-          "year_step_3_price": "Tier 3 Price (CNY/m\u00b3)",
-          "tier_cycle_start_md": "Tier Cycle Start (MM-DD)"
+          "update_interval": "Update interval (seconds)",
+          "balance_threshold": "Balance alert threshold (CNY)",
+          "bill_query_years": "Bill query years",
+          "yearly_step_2_start_volume": "Tier 2 start volume (m³)",
+          "yearly_step_3_start_volume": "Tier 3 start volume (m³)",
+          "year_step_1_price": "Tier 1 price (CNY/m³)",
+          "year_step_2_price": "Tier 2 price (CNY/m³)",
+          "year_step_3_price": "Tier 3 price (CNY/m³)",
+          "tier_cycle_start_md": "Tier cycle start month-day (MM-DD)"
         }
       }
     }
@@ -77,26 +78,36 @@
   "reauth": {
     "step": {
       "reauth_captcha": {
-        "title": "Re-authentication - Captcha",
-        "description": "ZR Gas token has expired. Please verify again.\nMobile: {mobile}\n\n1. {link_left}Click here to view captcha image{link_right}\n2. Read the code and enter it to send SMS",
+        "title": "Re-authenticate - Captcha",
+        "description": "The ZR Gas token has expired\nMobile: {mobile}\n\n1. {link_left}Click here to open the captcha image{link_right}\n2. Read the code, enter it and submit",
         "data": {
-          "captcha_code": "Captcha Code"
+          "captcha_code": "Captcha code"
         }
       },
       "reauth_sms_code": {
-        "title": "Re-authentication - SMS Code",
-        "description": "SMS code has been sent to {mobile}. Please enter it to complete re-authentication.",
+        "title": "Re-authenticate - SMS Code",
+        "description": "An SMS code has been sent to {mobile}. Enter it to continue.",
         "data": {
-          "sms_code": "SMS Code"
+          "sms_code": "SMS verification code"
+        }
+      },
+      "reauth_token": {
+        "title": "Re-authenticate - Token Import",
+        "description": "The token for the payment data source has expired. SMS login is unavailable for this source — capture a fresh Access Token and User ID from the payment mini-program and paste them below.",
+        "data": {
+          "access_token": "Access Token (required)",
+          "user_id": "User ID (required)"
         }
       }
     },
     "error": {
-      "captcha_required": "Please enter the captcha code",
-      "sms_code_required": "Please enter the SMS code",
-      "sms_send_failed": "Failed to send SMS code",
-      "invalid_sms_code": "SMS code is incorrect or expired",
-      "connection_error": "Connection failed. Please check your network."
+      "captcha_required": "Enter the captcha code",
+      "sms_code_required": "Enter the SMS verification code",
+      "sms_send_failed": "Failed to send the code",
+      "invalid_sms_code": "SMS code is wrong or expired",
+      "invalid_token": "Authentication failed — check the token",
+      "token_required": "Access Token and User ID are required",
+      "connection_error": "Connection failed, check your network"
     }
   },
   "entity": {
@@ -105,50 +116,62 @@
         "name": "Balance"
       },
       "monthly_usage": {
-        "name": "Monthly Usage"
+        "name": "Monthly usage"
       },
       "monthly_cost": {
-        "name": "Monthly Cost"
+        "name": "Monthly cost"
       },
       "owe_money": {
-        "name": "Owe Money"
+        "name": "Amount owed"
+      },
+      "award_money": {
+        "name": "Award money"
+      },
+      "gas_price": {
+        "name": "Gas price"
+      },
+      "max_gas": {
+        "name": "Max purchase volume"
       },
       "last_record": {
-        "name": "Last Record"
+        "name": "Meter reading"
       },
       "qty_meter_balance": {
-        "name": "Gas Volume Balance"
+        "name": "Gas volume balance"
       },
       "purch_times": {
-        "name": "Purchase Count"
+        "name": "Purchase count"
       },
       "last_record_time": {
-        "name": "Last Record Time"
+        "name": "Last reading date"
+      },
+      "last_payment": {
+        "name": "Last payment"
       },
       "annual_usage": {
-        "name": "Annual Usage"
+        "name": "Annual usage"
       }
     },
     "button": {
       "refresh": {
-        "name": "Refresh Data"
+        "name": "Refresh"
       }
     }
   },
   "issues": {
     "token_expired": {
-      "title": "ZR Gas Token Expired",
+      "title": "ZR Gas token expired",
       "fix_flow": {
         "step": {
           "confirm": {
-            "title": "Re-authentication",
-            "description": "Token for account {cust_name} has expired. Click submit to re-login."
+            "title": "Re-authenticate",
+            "description": "The token for account {cust_name} has expired. Submit to log in again."
           }
         }
       }
     },
     "balance_low": {
-      "title": "Gas Balance Low"
+      "title": "Gas balance low"
     }
   }
 }

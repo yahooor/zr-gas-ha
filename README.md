@@ -1,320 +1,165 @@
-# 中燃在线 - Home Assistant 集成
+# 中燃在线 - Home Assistant 集成（双数据源合并版）
 
 [![HACS Custom][hacs-shield]][hacs]
 [![GitHub Release][release-shield]][release]
 
-Home Assistant 自定义集成，用于从**中燃在线**平台获取燃气余额、月度用量和费用数据。
+Home Assistant 自定义集成，从**中燃在线**平台（`zrds.95007.com`）获取燃气余额、用量和费用数据。
+
+本版本（v2.0.0）合并了原先的两个半成品集成 `zr-gas-ha` 与 `zr-gas`，将它们对应的**两个不同小程序数据来源**统一到一个集成中，归一化成同一套传感器。
+
+## 两个数据来源
+
+| | 在线端 (mp) | 缴费端 (pay) |
+|---|---|---|
+| 来源仓库 | zr-gas-ha | zr-gas |
+| 小程序 AppID | wx19c4e29f3ef6b4a0 | wx2082cbdc25b3b8e6 (`accessFrom: yphpaymp`) |
+| 登录方式 | **短信验证码**（免抓包）或 Token 导入 | 仅 Token 导入 |
+| 余额字段 | `countMoney` | `qtyBalance` |
+| 独有数据 | — | 单价 `price`、最大购气量 `maxGas`、新欠费 `newOweMoney`、客户类型、表具富化（通气日期/表具条码/安装位置/卡类型） |
+| 实测状态 (2026-10) | ✅ 登录链路存活 | ⚠️ 登录端点被网关封禁（status=255），仅数据端点可用 |
+
+> **实测说明**：2026-10 实机验证——在线端验证码图片、短信发送、登录端点均到达业务逻辑层且错误语义正确；缴费端的 `sendSmsCode`/`verifySmsCode` 即使携带完整小程序请求头也被网关以 `认证失败(255)` 拦截，因此缴费端只能 Token 导入。两个来源的数据端点同属 `/crm_controller/*` 网关路径族、共用同一套 accessToken 头，所以**在线端登录的 token 也会自动尝试表具富化端点**（getMeterInfo），调通即白赚字段、失败静默降级。
 
 ## 功能特性
 
-- **余额监控** — 实时查看燃气账户余额（元）
-- **月度用量** — 显示当月累计用气量（m³）
-- **月度费用** — 显示当月累计费用（元）
-- **欠费提醒** — 显示账户欠费金额
-- **表读数** — 显示累计表读数和气量余额
-- **购气统计** — 显示累计购气次数和最后抄表日期
-- **阶梯气价** — 年度累计用量 + 三档阶梯计价 + 当前阶梯信息
-- **月度/年度统计** — 历史用气量和费用按月/年汇总
-- **多账户支持** — 自动发现绑定的所有燃气账户
-- **定时刷新** — 默认每 6 小时自动更新（可配置）
-- **Token 过期提醒** — 自动检测并引导重新认证
-- **Energy Dashboard** — 用量数据支持接入 HA 能源面板
-- **前端卡片** — 自定义燃气卡片，直观展示所有数据
+- **余额监控** — 实时燃气余额（元），余额不足自动提醒（HA 修复中心）
+- **月度用量/费用** — 当月累计用气量（m³）与费用（元）
+- **阶梯气价** — 年度累计用量 + 三档阶梯 + 当前档位/单价（档位与单价可配置）
+- **月度/年度统计** — `monthly_stats` / `yearly_stats` 属性，历史用量按月/年汇总
+- **表具信息** — 表读数、气量余额、购气次数、最后抄表日期 + 设备属性（表号/型号/卡号/通气日期/安装位置等）
+- **新增传感器** — 燃气单价、赠送金额、最大购气量（数据源提供时）
+- **多账户** — 自动发现绑定的所有燃气账户，每个账户独立设备
+- **多来源并存** — 在线端与缴费端可同时配置，互不冲突（实体 ID 带来源前缀区分）
+- **Token 过期自动提醒** — 修复中心引导重新认证（在线端支持短信重认证）
+- **前端卡片** — `zr-gas-card` 自定义卡片，展示余额/用量/阶梯/表具信息
 
 ## 安装
 
-### 方式一：HACS 自定义仓库（推荐）
+### HACS（推荐）
 
-1. 在 HACS 中点击 **⋮** → **自定义仓库**
-2. 填入仓库地址：`https://github.com/yahooor/zr-gas-ha`
-3. 类别选择 **Integration**
-4. 点击 **添加** → 搜索 **"中燃在线"** → 安装
-5. 重启 Home Assistant
+1. HACS → **⋮** → **自定义仓库** → 填入 `https://github.com/yahooor/zr-gas-ha`，类别 **Integration**
+2. 搜索 **"中燃在线"** 安装 → 重启 Home Assistant
 
-### 方式二：手动安装
+### 手动安装
 
-1. 从 [Releases](https://github.com/yahooor/zr-gas-ha/releases) 下载最新版本 zip
-2. 解压到 HA 配置目录的 `custom_components/` 下（确保目录结构为 `custom_components/zr_gas/`）
-3. 重启 Home Assistant
+将 `custom_components/zr_gas/` 复制到 HA 配置目录的 `custom_components/` 下，重启 HA。
+
+> 从 v1.x（旧 zr-gas-ha）升级：配置条目自动迁移，实体 ID 不变；从旧 zr-gas 仓库安装的用户请先卸载旧版（同域名会冲突）。
 
 ## 配置
 
-### 配置步骤
+### 在线端 · 短信登录（推荐，免抓包）
 
-**方式一：短信验证码登录（推荐）**
+1. **设置** → **设备与服务** → **添加集成** → 搜索 **"中燃在线"**
+2. 数据来源选 **在线端**，登录方式选 **短信验证码登录**，输入手机号
+3. 点击页面链接打开验证码图片 → 识别填入 → 提交（发送短信）
+4. 输入收到的短信验证码 → 登录 → 自动发现账户
 
-1. 进入 **设置** → **设备与服务** → **添加集成**
-2. 搜索 **"中燃在线"**
-3. 选择认证方式：**sms**
-4. 输入注册时使用的 **手机号码**
-5. **图形验证码步骤**：点击页面中的链接，在新标签页打开验证码图片 → 识别后填入输入框 → 点击提交发送短信
-6. **短信验证码步骤**：输入收到的短信验证码 → 提交登录
-7. 系统自动发现绑定的燃气账户
-8. 配置完成！
+### 在线端 · Token 导入（高级）
 
-**方式二：Token 直接导入（高级）**
+适用于已通过抓包等方式获取凭据的用户：填入 `accessToken` + `userId`（`x-mas-app-info` 选填）。
 
-适用于已通过其他方式获取 accessToken 的用户（如抓包工具）。
+### 缴费端 · Token 导入
 
-1. 进入 **设置** → **设备与服务** → **添加集成**
-2. 搜索 **"中燃在线"**
-3. 选择认证方式：**token**
-4. 填入 **accessToken**、**userId**（必填），**x-mas-app-info** 和 **手机号**（选填）
-5. 系统验证 Token 有效性 → 自动发现绑定的燃气账户
-6. 配置完成！
+从缴费小程序抓包获取 `accessToken` + `userId` 后导入。缴费端的额外字段（单价/最大购气量/表具富化）在 Token 有效时可用。
 
-> **说明**: 推荐使用短信验证码登录，无需抓包工具。Token 过期后会自动提示重新验证。
-
-### 可选配置
-
-在集成选项中可以修改：
+### 可选配置（选项）
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
-| 刷新间隔 | 21600 秒 (6小时) | 数据更新频率，最小 300 秒 |
-| 余额预警阈值 | 50 元 | 余额低于此值时触发通知 |
-| 账单查询年数 | 2 | 查询历史账单的年数范围（1-5年） |
-| 第二档起始量 | 400 m³ | 阶梯气价第二档年用气量起点 |
-| 第三档起始量 | 1680 m³ | 阶梯气价第三档年用气量起点 |
-| 第一档单价 | 2.99 元/m³ | 阶梯气价第一档单价 |
-| 第二档单价 | 3.44 元/m³ | 阶梯气价第二档单价 |
-| 第三档单价 | 4.34 元/m³ | 阶梯气价第三档单价 |
-| 阶梯周期起始月日 | 01-01 | 阶梯气价年度周期起始日期（MM-DD） |
+| 刷新间隔 | 21600 秒 (6小时) | 最小 300 秒 |
+| 余额预警阈值 | 50 元 | 低于触发提醒 |
+| 账单查询年数 | 2 | 1-5 年 |
+| 第二/三档起始量 | 400 / 1680 m³ | 阶梯气价 |
+| 三档单价 | 2.99 / 3.44 / 4.34 元 | 张家界民用默认值 |
+| 阶梯周期起始 | 01-01 | MM-DD |
 
 ## 传感器
 
-每个燃气账户会创建以下传感器：
+| 传感器 | 单位 | 在线端 | 缴费端 | 说明 |
+|--------|------|:---:|:---:|------|
+| 余额 | CNY | ✅ | ✅ | 在线端取 countMoney，缴费端取 qtyBalance |
+| 月用量 / 月费用 | m³ / CNY | ✅ | ✅ | 来自账单接口 |
+| 欠费金额 | CNY | ✅ | ✅ | 附带 new_owe_money 属性（缴费端） |
+| 赠送金额 | CNY | ✅ | ✅ | awardMoney |
+| 燃气单价 | 元/m³ | ✅* | ✅ | *在线端取当月账单单价 |
+| 最大购气量 | m³ | — | ✅ | maxGas |
+| 表读数 / 气量余额 | m³ | ✅ | ✅ | |
+| 购气次数 / 最后抄表日期 | — | ✅ | ✅ | |
+| 年度累计用量 | m³ | ✅ | ✅ | 附阶梯档位/单价/月度年度统计 |
 
-| 传感器 | 类型 | 单位 | 说明 |
-|--------|------|------|------|
-| 余额 | monetary | CNY | 当前账户余额 |
-| 月用量 | gas | m³ | 当月累计用气量 |
-| 月费用 | monetary | CNY | 当月累计费用 |
-| 欠费金额 | monetary | CNY | 账户欠费金额 |
-| 表读数 | gas | m³ | 累计表读数 |
-| 气量余额 | gas | m³ | 剩余气量 |
-| 购气次数 | — | 次 | 累计购气次数 |
-| 最后抄表日期 | timestamp | — | 上次抄表时间 |
-| 年度累计用量 | gas | m³ | 当前阶梯周期的累计用气量 |
-
-每个传感器附带以下设备属性：燃气编号、客户名、用气地址、燃气公司、燃气表号、表型号、卡号、费用编号、客户状态
-
-**年度累计用量传感器** 额外提供以下 attributes：
-- `current_tier`: 当前阶梯档位（1/2/3）
-- `current_tier_price`: 当前阶梯单价（元/m³）
-- `tier_cycle_start`: 当前阶梯周期起始日期
-- `monthly_stats`: 月度统计列表 `[{"month": "2026-01", "gas_num": 12.5, "gas_cost": 37.38}, ...]`
-- `yearly_stats`: 年度统计列表 `[{"year": "2026", "gas_num": 150.2, "gas_cost": 449.10}, ...]`
+设备属性：燃气编号、客户名、地址、燃气公司、表号、表型号、卡号、费用编号、客户状态、数据来源；缴费端另有卡类型、通气日期、表具条码、安装位置。
 
 ## 前端卡片
-
-集成附带自定义前端卡片 `zr-gas-card`，可直观展示燃气数据。
-
-### 安装卡片
-
-1. 将 `www/zr_gas_card/zr-gas-card.js` 复制到 HA 配置目录 `www/zr_gas_card/`
-2. 进入 **设置** → **仪表板** → ⋮ → **资源** → **添加资源**
-   - URL: `/local/zr_gas_card/zr-gas-card.js`
-   - 类型: JavaScript Module
-3. 重启 Home Assistant
-
-### 使用卡片
-
-在仪表板中添加自定义卡片：
 
 ```yaml
 type: custom:zr-gas-card
 entity: sensor.zhong_ran_ran_qi_8854_balance
-show_usage: true    # 显示用量统计（默认 true）
-show_meter: true    # 显示表信息（默认 true）
-low_threshold: 50   # 余额预警阈值（默认 50 元）
+# 可选:
+# title: 我的燃气
+# low_threshold: 50      # 余额预警线
+# show_usage: true       # 用量/阶梯区
+# show_meter: true       # 表具信息区
+```
+
+安装：`www/zr_gas_card/zr-gas-card.js` 复制到 HA 的 `www/zr_gas_card/`，资源注册 `/local/zr_gas_card/zr-gas-card.js`（JavaScript Module）。
+
+## API 连通性验证
+
+仓库附带独立验证脚本（无需 HA 环境）：
+
+```bash
+# 无凭据探测端点存活（不会发送真实短信）
+python scripts/verify_api.py
+
+# 用有效 token 验证数据链路
+python scripts/verify_api.py --token <accessToken> --user-id <userId>
+
+# 交互式短信登录，打印可用凭据
+python scripts/verify_api.py --sms --mobile <手机号>
 ```
 
 ## 技术细节
 
-- **API 签名**: `md5(param + salt + timestamp)`
-- **请求格式**: `application/x-www-form-urlencoded`
-- **零外部依赖**: 仅使用 HA 内置库（aiohttp、hashlib）
-- **最低 HA 版本**: 2024.1.0
+- **签名**: `md5(param + salt + timestamp)`，salt `yph1234567890`（在线端 JS 逆向确认）
+- **请求**: `application/x-www-form-urlencoded`（checkMasInfo 用 JSON）
+- **网关行为**: 无 token 访问 `/crm_controller/*` 统一返回 `status=255 认证失败`；缴费端登录端点亦被此策略拦截
+- **零外部依赖**（aiohttp/hashlib 均为 HA 内置）；最低 HA 2024.1.0
 
 ## 更新日志
 
-### v0.12.2 — 修复 Zip 文件结构（HACS 安装失败根因）
+### v2.0.0 — 双源合并重构
 
-**Zip 打包修复：**
-- **修复**: `release.yml` — 重写打包脚本，使用 `mkdir + cp + zip` 方法（替代有 bug 的 Python 一行代码）
-- **结果**: Zip 文件现在包含正确的 `custom_components/zr_gas/` 目录结构
-- **原因**: HACS 期望 zip 解压后包含 `custom_components/` 前缀，旧脚本生成的文件直接在根目录
+**合并**：
+- 合并 `zr-gas-ha`（在线端）与 `zr-gas`（缴费端）两个集成为一个，配置时选择数据来源
+- 统一 API 层：`ZrGasBaseApi` 基类 + `ZrGasMpApi` / `ZrGasPayApi`，各自保留登录流程与字段映射（余额字段 countMoney vs qtyBalance 等差异在客户端内归一化）
+- 缴费端独有字段并入统一模型：燃气单价、赠送金额、最大购气量、新欠费、客户类型、表具富化（通气日期/条码/位置/卡类型）
+- 表具富化 getMeterInfo 对所有来源自动尝试（同网关路径族 token 通用），失败静默降级 — 在线端短信登录即可免抓包解锁缴费端字段
 
-**验证通过：**
-- ✅ `zr_gas.zip` 内部结构：`custom_components/zr_gas/__init__.py` 等
-- ✅ HACS 可以正确识别和安装集成
+**实测验证 (2026-10)**：
+- 在线端登录链路（验证码/发短信/登录）存活，错误语义与实现一致（-1 验证码错误 / 2 已过期）
+- 缴费端登录端点被网关认证层拦截（status=255，完整小程序头亦然）→ 短信登录移除，仅 Token 导入
+- 密码登录端点不存在（404 探测确认）
+- 附 `scripts/verify_api.py` 可重复验证
 
-### v0.12.1 — 修复 HACS 文件名配置
+**工程**：
+- Config Flow VERSION 2 + 自动迁移（v1 条目升级不断实体）
+- 在线端/缴费端可并存：unique_id 与设备标识带来源前缀
+- 传感器 9 → 12（新增燃气单价/赠送金额/最大购气量），增强版前端卡片（来源徽标/阶梯框/表具区，兄弟实体自动推导）
+- 测试 68 → 92（新增双源字段映射/状态归一化/账单解析/表具签名等）
+- 移除 quality_scale.yaml；ruff + pytest CI
 
-**HACS 修复：**
-- **修复**: `hacs.json` — 删除错误的 `filename: "zr_gas_0102.zip"` 字段，让 HACS 自动匹配 Release 中的 `zr_gas.zip`
-- **原因**: 固定文件名与实际 CI/CD 生成的文件名不匹配，导致 HACS 下载失败
+### v0.12.2 及更早
 
-### v0.11.0 — HACS 规范修复
-
-**HACS 规范修复：**
-- **修复**: `manifest.json` — 添加 `integration_type: "device"` 和 `loggers`
-- **修复**: `hacs.json` — 移除 `iot_class`（HACS 1.34+ 弃用），`filename` 改为版本无关命名 `zr_gas.zip`
-- **修复**: `.gitignore` — 完善规则，移除冗余的 `zr_gas.zip` 行
-- **修复**: 删除根目录三个 zip 文件（应通过 Release Assets 分发）
-
-**仓库规范化：**
-- 符合 HACS 规范（manifest.json + hacs.json）
-- GitHub Release 自动分发 zip 文件
-- 仓库结构清晰，无冗余文件
-
-
-### v0.10.2 — 移除冗余 state_class + HACS 配置优化
-
-**代码清理：**
-- **移除**: `sensor.py` — monthly_usage/monthly_cost/owe_money 的 `state_class` 字段（无 state_class 时 HA 不参与长期统计，避免月度切换时的异常行为）
-
-**改进：**
-- **新增**: `hacs.json` — 添加 `zip_release: true` + `filename` 配置，HACS 自动识别 Release zip 文件
-
-
-
-### v0.10.1 — 代码审查修复（8 项修复）
-
-**Bug 修复：**
-- **修复**: `__init__.py` — `datetime.now()` → `dt_util.now()`（时区修正）
-- **修复**: `sensor.py` — balance 传感器 `state_class=TOTAL` → `MEASUREMENT`（余额非累计量）
-- **修复**: `sensor.py` — monthly_usage/cost `state_class=TOTAL` → `MEASUREMENT`（月切换避免负增量）
-- **修复**: `__init__.py` — `_calculate_annual_usage` 返回 4-tuple，消除 cycle_start 重复计算
-- **修复**: `config_flow.py` — OptionsFlow 阶梯参数验证（tier3>tier2、MM-DD格式）
-- **修复**: `api.py` — debug 日志遮蔽手机号和验证码
-- **修复**: `__init__.py` — bill 列表排序保证（sort by period, reverse）
-- **修复**: `const.py` — "customers" 提取为 `CONF_CUSTOMERS` 常量
-
-### v0.10.0 — 阶梯气价 + 历史统计 + 费用反算
-
-**新功能：**
-- **新增年度累计用量传感器** — 显示当前阶梯周期的累计用气量（m³），包含当前阶梯档位和单价
-- **新增阶梯气价系统** — 三档年度阶梯计价（可配置各档起始量和单价），支持可配置阶梯周期起始日
-- **新增月度/年度统计** — 年度累计用量传感器附带 `monthly_stats` 和 `yearly_stats` attributes，按月/年汇总历史用气量和费用
-- **新增费用反算用气量** — `TierConfig.calculate_usage_from_cost()` 方法，根据费用和当前阶梯价格反算实际用气量（处理跨阶梯场景）
-- **新增账单查询范围配置** — 可配置查询 1-5 年历史账单（默认 2 年），在 Options 中设置
-- **新增阶梯气价配置项** — OptionsFlow 新增 7 个配置项：三档起始量、三档单价、阶梯周期起始月日
-
-**改进：**
-- 阶梯气价默认值适配张家界民用天然气（一档 2.99 元/m³、二档 3.44 元/m³、三档 4.34 元/m³）
-- 翻译文件（中/英）同步更新，包含新增传感器和配置项翻译
-
-### v0.9.1 — 代码清理
-
-**代码清理：**
-- **移除**: `api.py` 中未使用的 `import base64`
-- **移除**: `api.py` 中多余的 `self._salt` 实例变量，改用 `SIGN_SALT` 常量
-- **移除**: `api.py` 中已废弃的 `fetch_captcha_image()` 方法（已由 config_flow 的 `_fetch_and_save_captcha` 替代）
-- **修复**: `api.py` 中 `login_with_sms` 的 `login_data`/`mas_token` 重复赋值逻辑
-- **修复**: `api.py` 中 `init_request` 状态检查从 `== 1` 改为 `str(status) in ("0", "1")`，兼容字符串/整数返回
-- **移除**: `config_flow.py` 中未使用的 `_get_captcha_local_url()` 函数
-- **移除**: `config_flow.py` 中所有内联 import（`import time`、`import aiohttp as _aiohttp`），统一到顶层
-- **移除**: `config_flow.py` 中重复的 `import os`
-- **补充**: `config_flow.py` 添加 `HomeAssistant` 类型导入
-
-### v0.9.0 — Bug 修复 + 代码清理
-
-**Bug 修复：**
-- **修复**: 最后抄表日期传感器 (`TIMESTAMP`) 崩溃 — API 返回日期字符串 `"2026-04-21"` 需解析为带时区的 `datetime` 对象
-- **修复**: sensor.py 和 button.py 的 `ZrGasDataUpdateCoordinator` 导入改用 `TYPE_CHECKING` 保护，避免潜在循环导入
-
-**代码清理：**
-- **移除**: `api.py` 中未使用的 `_post_raw` 死代码
-
-### v0.8.0 — 5 个新传感器 + Bug 修复 + 前端卡片
-
-**新功能：**
-- **新增 5 个传感器**：欠费金额、表读数、气量余额、购气次数、最后抄表日期
-- **新增设备属性**：燃气编号、客户名、地址、燃气公司、表号、表型号、卡号等 10 个属性
-- **新增动态设备信息**：设备页面自动显示燃气公司名、表型号、表号、卡号
-- **新增前端卡片**：`zr-gas-card` 自定义卡片，展示余额/用量/表信息
-
-**Bug 修复：**
-- **修复**: API `status` 字段兼容字符串 `"1"` 和整数 `1`，解决 `"API error (status=1): 查询成功"` 误报
-- **修复**: `"token有效"` 不再被误判为认证失败
-- **修复**: `CURRENCY_YUAN` 在 HA 新版本中已移除，改用 `"CNY"` 字符串
-- **修复**: `_abort_if_already_configured()` 改为 `_abort_if_unique_id_configured()` 适配 HA 2024+
-- **修复**: Sensor `state_class` 从 `MEASUREMENT` 改为 `TOTAL`，适配 `MONETARY`/`GAS` 设备类
-- **修复**: `config_flow.py` 移除 `aiofiles` 依赖，改用 `hass.async_add_executor_job()` 写文件
-
-### v0.7.1 — 修复 aiofiles 依赖问题
-
-- **修复**: `config_flow.py` 移除 `aiofiles` 依赖，改用 `hass.async_add_executor_job()` 写文件，兼容 HA 默认环境
-- **背景**: v0.7.0 使用了 `aiofiles`，但 HA 默认不含此库，会导致集成加载失败
-
-### v0.7.0 — SMS 登录流程修复
-
-- **修复**: 使用 `async_create_clientsession` + `aiohttp.CookieJar(unsafe=True)` 创建带真实 CookieJar 的独立 session
-- **修复**: 确保登录三步流程（captcha → sendsms → login）共享同一 session/cookie，JSESSIONID 正确传递
-- **修复**: `login_with_sms` 状态码判断 — status=2(验证码过期)、status=-1(验证码错误)、status=0/1(成功)
-- **修复**: `send_sms_code` 增加 status=2 过期判断
-- **修复**: Reauth 流程完成后正确关闭独立 session
-- **问题根因**: HA 的 `async_get_clientsession` 使用 DummyCookieJar，所有 cookie 在请求间被丢弃
-
-### v0.6.2 — Token 导入流程修复
-
-- **修复**: Token 导入验证从 `init_request()` 改为 `check_token()`，更精准验证 token 有效性
-- **修复**: `init_request` 异常从仅捕获 `ZrGasApiError` 改为捕获 `Exception`，避免非预期错误阻断流程
-- **修复**: Discover 流程中 `init_request` 失败不再阻断后续账户发现，拆分为独立 try 块
-
-### v0.6.1 — 代码审查修复
-
-- **修复**: issue_registry 重复创建且 token 恢复后未清除的问题
-- **修复**: Reauth 流程中 `entry_id` 缺失导致 KeyError 崩溃
-- **修复**: 月度用量传感器 `state_class` 从 `TOTAL_INCREASING` 改为 `MEASUREMENT`，避免月度重置时统计异常
-- **修复**: 账单数据精确匹配当前月份，避免取到历史账单
-- **清理**: 移除未使用的 `fetch_captcha_image`、`encode_captcha_image` 死代码
-- **清理**: 移除未使用的 `CannotConnect`、`InvalidAuth` 异常类
-- **改进**: Coordinator 数据更新成功时自动清除 token 过期 issue
-- **改进**: 增加数据获取成功的调试日志
-
-### v0.5.0
-
-- **重构**: Config Flow 拆分图形验证码与短信验证码为独立步骤
-  - 步骤1: 输入手机号
-  - 步骤2: 点击链接打开验证码图片 → 输入验证码 → 提交发送短信
-  - 步骤3: 输入短信验证码完成登录
-- **重构**: Reauth 流程同步拆分（reauth_captcha → reauth_sms_code）
-- **改进**: 发送短信失败时自动刷新验证码链接
-- **改进**: Config Flow MINOR_VERSION 升至 3
-
-### v0.4.2
-
-- **修复**: 验证码图片在 HA Config Flow 中无法显示
-  - 放弃 base64 data URI 和自定义 HTTP 端点方案
-  - 改为提供验证码外部链接，用户点击链接在新标签页打开图片，手动识别后填回
-  - 移除 `views.py`（不再需要自定义 HTTP 端点）
-
-### v0.4.1
-
-- **修复**: 验证码图片仍无法显示 — 改用 HA 自定义 HTTP 端点提供验证码图片
-
-### v0.3.0
-
-- **修复**: Config Flow 验证码图片无法显示 — 改为服务端获取并嵌入 base64 data URI
-
-### v0.2.0
-
-- **新增**: 短信验证码登录流程（手机号 + 图形验证码 + 短信验证码）
-- **新增**: Token 过期后 Reauth 短信重新认证
-
-### v0.1.0
-
-- 初始版本，支持 accessToken 直接接入
+见 [zr-gas-ha 历史更新日志](https://github.com/yahooor/zr-gas-ha/releases)。
 
 ## 致谢
 
 - [alickglyn](https://bbs.hassbian.com/thread-30786-1-1.html) — 原始 API 逆向分析
 - [gao19970120](https://bbs.hassbian.com/thread-31008-1-1.html) — Node-RED + MQTT 方案参考
-- [ha_hfcrgas](https://github.com/Cyborg2017/ha_hfcrgas) — SensorEntityDescription 模式参考
-- [hztowngas](https://github.com/palafin02back/hztowngas) — Coordinator 和 Session 管理参考
+- [ExceptionsOccur/hazr](https://github.com/ExceptionsOccur/hazr) — 缴费记录端点（getPaymentLogForHsh）、埋点参数、methodEncrypt 加密协议（appKey/sign 密钥）借鉴
+- [githubdulong/Script (ChinaGas.js)](https://github.com/githubdulong/Script) — 「数据端点签名不校验、x-mas-app-info+userId 为真实凭据」的关键验证
+- [ha_hfcrgas](https://github.com/Cyborg2017/ha_hfcrgas) / [hztowngas](https://github.com/palafin02back/hztowngas) — 架构参考
 
 ## 免责声明
 

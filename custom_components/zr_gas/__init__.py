@@ -1,11 +1,14 @@
 """The 中燃在线 (ZR Gas) integration for Home Assistant.
 
 This integration monitors gas account balance and usage through the
-ZR Gas (中燃在线) cloud API. It creates sensor entities for each
-bound gas customer account.
+ZR Gas (中燃在线) cloud API. It supports two data sources of the same
+backend (在线端 mp / 缴费端 pay, see ``api.py``), normalizes their
+different field mappings into one coordinator/sensor model, and creates
+sensor entities for each bound gas customer account.
 
 Setup flow:
-  1. User logs in via SMS verification code (mobile + captcha + SMS code)
+  1. User picks a data source and authenticates
+     (在线端: SMS login or token import; 缴费端: token import only)
   2. Integration discovers bound gas customer accounts
   3. For each account, a DataUpdateCoordinator is created
   4. Sensor platform is forwarded for entity creation
@@ -18,24 +21,25 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+import homeassistant.util.dt as dt_util
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
-import homeassistant.util.dt as dt_util
 
-from .api import ZrGasAPI, ZrGasApiError, ZrGasAuthError
+from .api import ZrGasApiError, ZrGasAuthError, ZrGasBaseApi, ZrGasMpApi, ZrGasPayApi
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_BALANCE_THRESHOLD,
     CONF_BILL_YEARS,
     CONF_CUSTOMERS,
+    CONF_SOURCE,
     CONF_TIER_1_PRICE,
     CONF_TIER_2_PRICE,
     CONF_TIER_2_START,
@@ -55,6 +59,8 @@ from .const import (
     DEFAULT_TIER_CYCLE_START,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    SOURCE_MP,
+    SOURCE_PAY,
 )
 from .models import (
     MonthlyStat,
@@ -69,6 +75,36 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SENSOR, Platform.BUTTON]
 
 
+def build_api_client(
+    session, source: str, access_token: str, user_id: str, x_mas_app_info: str = ""
+) -> ZrGasBaseApi:
+    """Create the source-specific API client.
+
+    Args:
+        session: aiohttp client session.
+        source: Data source (SOURCE_MP / SOURCE_PAY).
+        access_token: Access token from login/import.
+        user_id: User identifier.
+        x_mas_app_info: x-mas-app-info header (online source only).
+
+    Returns:
+        A ZrGasBaseApi subclass instance for the requested source.
+    """
+    if source == SOURCE_PAY:
+        return ZrGasPayApi(
+            session,
+            access_token=access_token,
+            user_id=user_id,
+        )
+    # 在线端（默认，兼容旧版无 source 字段的配置条目）
+    return ZrGasMpApi(
+        session,
+        access_token=access_token,
+        user_id=user_id,
+        x_mas_app_info=x_mas_app_info,
+    )
+
+
 def _build_tier_config(options: dict[str, Any]) -> TierConfig:
     """从 Options 构建 TierConfig 实例。"""
     return TierConfig(
@@ -77,9 +113,7 @@ def _build_tier_config(options: dict[str, Any]) -> TierConfig:
         tier_1_price=float(options.get(CONF_TIER_1_PRICE, DEFAULT_TIER_1_PRICE)),
         tier_2_price=float(options.get(CONF_TIER_2_PRICE, DEFAULT_TIER_2_PRICE)),
         tier_3_price=float(options.get(CONF_TIER_3_PRICE, DEFAULT_TIER_3_PRICE)),
-        tier_cycle_start_md=options.get(
-            CONF_TIER_CYCLE_START, DEFAULT_TIER_CYCLE_START
-        ),
+        tier_cycle_start_md=options.get(CONF_TIER_CYCLE_START, DEFAULT_TIER_CYCLE_START),
     )
 
 
@@ -88,12 +122,6 @@ def _calculate_monthly_stats(bills: list[ZrGasBill]) -> list[MonthlyStat]:
 
     将同月的账单汇总为一条 MonthlyStat。
     API 返回的 period 格式为 YYYYMM。
-
-    Args:
-        bills: 全部账单列表
-
-    Returns:
-        按月汇总的统计列表
     """
     month_map: dict[str, MonthlyStat] = {}
     for bill in bills:
@@ -102,32 +130,20 @@ def _calculate_monthly_stats(bills: list[ZrGasBill]) -> list[MonthlyStat]:
         # 格式化为 YYYY-MM
         month_key = f"{bill.period[:4]}-{bill.period[4:6]}"
         if month_key not in month_map:
-            month_map[month_key] = MonthlyStat(
-                month=month_key, gas_num=0.0, gas_cost=0.0
-            )
+            month_map[month_key] = MonthlyStat(month=month_key, gas_num=0.0, gas_cost=0.0)
         month_map[month_key].gas_num += bill.usage_volume
         month_map[month_key].gas_cost += bill.usage_amount
 
-    result = sorted(month_map.values(), key=lambda m: m.month)
-    return result
+    return sorted(month_map.values(), key=lambda m: m.month)
 
 
 def _calculate_yearly_stats(monthly_stats: list[MonthlyStat]) -> list[YearlyStat]:
-    """从月度统计汇总年度统计。
-
-    Args:
-        monthly_stats: 月度统计列表
-
-    Returns:
-        按年汇总的统计列表
-    """
+    """从月度统计汇总年度统计。"""
     year_map: dict[str, YearlyStat] = {}
     for ms in monthly_stats:
         year_key = ms.month[:4]
         if year_key not in year_map:
-            year_map[year_key] = YearlyStat(
-                year=year_key, gas_num=0.0, gas_cost=0.0
-            )
+            year_map[year_key] = YearlyStat(year=year_key, gas_num=0.0, gas_cost=0.0)
         year_map[year_key].gas_num += ms.gas_num
         year_map[year_key].gas_cost += ms.gas_cost
 
@@ -139,12 +155,6 @@ def _calculate_tier_cycle_start(tier_cycle_start_md: str) -> str:
 
     例如 tier_cycle_start_md="01-01" → 当前周期从今年1月1日起
     例如 tier_cycle_start_md="12-31" → 当前周期从去年12月31日起
-
-    Args:
-        tier_cycle_start_md: 阶梯周期起始月日，格式 MM-DD
-
-    Returns:
-        当前阶梯周期起始日 YYYY-MM-DD
     """
     now = dt_util.now()
     try:
@@ -161,10 +171,7 @@ def _calculate_tier_cycle_start(tier_cycle_start_md: str) -> str:
 
     if now >= md_this_year:
         return md_this_year.strftime("%Y-%m-%d")
-    else:
-        return datetime(now.year - 1, sm, sd, tzinfo=dt_util.DEFAULT_TIME_ZONE).strftime(
-            "%Y-%m-%d"
-        )
+    return datetime(now.year - 1, sm, sd, tzinfo=dt_util.DEFAULT_TIME_ZONE).strftime("%Y-%m-%d")
 
 
 def _calculate_annual_usage(
@@ -174,10 +181,6 @@ def _calculate_annual_usage(
     """计算当前阶梯周期的累计用气量。
 
     从阶梯周期起始月份开始累加月度用量。
-
-    Args:
-        monthly_stats: 月度统计列表
-        tier_config: 阶梯气价配置
 
     Returns:
         (annual_usage, current_tier, current_tier_price, cycle_start)
@@ -194,7 +197,6 @@ def _calculate_annual_usage(
         except (ValueError, IndexError):
             continue
         # 判断是否在当前阶梯周期内
-        # 简单规则：从周期起始月份开始累加
         ms_val = ms_year * 12 + ms_month
         cycle_val = cycle_year * 12 + cycle_month
         if ms_val >= cycle_val:
@@ -207,42 +209,27 @@ def _calculate_annual_usage(
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up 中燃在线 from a config entry.
 
-    Creates an API client using HA's shared aiohttp session,
-    initializes coordinators for each bound gas account, and
+    Creates a source-specific API client using HA's shared aiohttp
+    session, initializes coordinators for each bound gas account, and
     forwards setup to the sensor platform.
-
-    Args:
-        hass: Home Assistant instance.
-        entry: Config entry with access token and account info.
-
-    Returns:
-        True if setup was successful.
     """
     hass.data.setdefault(DOMAIN, {})
 
+    source = entry.data.get(CONF_SOURCE, SOURCE_MP)
     access_token = entry.data[CONF_ACCESS_TOKEN]
     user_id = entry.data.get(CONF_USER_ID, "")
     x_mas_app_info = entry.data.get(CONF_X_MAS_APP_INFO, "")
     customers = entry.data.get(CONF_CUSTOMERS, [])
-    update_interval_seconds = entry.options.get(
-        CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL
-    )
+    update_interval_seconds = entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
     tier_config = _build_tier_config(entry.options)
     bill_years = entry.options.get(CONF_BILL_YEARS, DEFAULT_BILL_YEARS)
-    balance_threshold = entry.options.get(
-        CONF_BALANCE_THRESHOLD, DEFAULT_BALANCE_THRESHOLD
-    )
+    balance_threshold = entry.options.get(CONF_BALANCE_THRESHOLD, DEFAULT_BALANCE_THRESHOLD)
 
     # Use HA's shared aiohttp session (avoids resource leaks)
     session = async_get_clientsession(hass)
 
-    # Create API client
-    api = ZrGasAPI(
-        session,
-        access_token=access_token,
-        user_id=user_id,
-        x_mas_app_info=x_mas_app_info,
-    )
+    # Create source-specific API client
+    api = build_api_client(session, source, access_token, user_id, x_mas_app_info)
 
     # Create a coordinator for each customer account
     coordinators: dict[str, ZrGasDataUpdateCoordinator] = {}
@@ -254,6 +241,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator = ZrGasDataUpdateCoordinator(
             hass=hass,
             api=api,
+            source=source,
             cust_code=cust_code,
             cust_name=cust_name,
             update_interval_seconds=update_interval_seconds,
@@ -277,6 +265,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Store coordinators in hass.data (session is managed by HA)
     hass.data[DOMAIN][entry.entry_id] = {
         "api": api,
+        "source": source,
         "coordinators": coordinators,
     }
 
@@ -290,15 +279,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a 中燃在线 config entry.
-
-    Args:
-        hass: Home Assistant instance.
-        entry: Config entry to unload.
-
-    Returns:
-        True if unload was successful.
-    """
+    """Unload a 中燃在线 config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
@@ -307,40 +288,52 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload a config entry when options change.
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old config entries to the current version.
 
-    Args:
-        hass: Home Assistant instance.
-        entry: Config entry to reload.
+    v1 (单数据源) → v2 (双数据源): 补充 source 字段，默认在线端 (mp)，
+    其余数据/选项不变。实体 unique_id 对在线端保持不变，升级不换实体。
     """
+    if entry.version > 2:
+        # 无法降级
+        return False
+
+    if entry.version < 2:
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_SOURCE: entry.data.get(CONF_SOURCE, SOURCE_MP)},
+            version=2,
+        )
+        _LOGGER.info("Migrated config entry to v2 (source=%s)", entry.data.get(CONF_SOURCE))
+
+    return True
+
+
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload a config entry when options change."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
     """Coordinator to fetch and manage data for a single gas customer account.
 
-    Each bound gas customer gets its own coordinator instance that
-    periodically fetches account info and billing data from the API.
+    Works with either data source (在线端/缴费端): the API client
+    normalizes field mappings, the coordinator additionally enriches
+    with meter info when the source provides it (缴费端 only).
 
-    Features (inspired by reference integrations):
+    Features:
     - Parallel data fetching with asyncio.gather
-    - Preserves old data on error (avoids sensor state loss)
+    - Best-effort meter info enrichment (failure downgrades gracefully)
     - Proper auth error handling for reauth flow
     - Tiered gas pricing calculation
     - Monthly/yearly statistics aggregation
-
-    Attributes:
-        cust_code: Customer code for this account.
-        cust_name: Customer name for this account.
-        tier_config: Tiered gas pricing configuration.
-        bill_years: Number of years to query bills.
     """
 
     def __init__(
         self,
         hass: HomeAssistant,
-        api: ZrGasAPI,
+        api: ZrGasBaseApi,
+        source: str,
         cust_code: str,
         cust_name: str,
         update_interval_seconds: int,
@@ -352,7 +345,8 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
 
         Args:
             hass: Home Assistant instance.
-            api: ZrGasAPI client instance.
+            api: Source-specific API client.
+            source: Data source (SOURCE_MP / SOURCE_PAY).
             cust_code: Customer code.
             cust_name: Customer name.
             update_interval_seconds: Refresh interval in seconds.
@@ -367,6 +361,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             update_interval=timedelta(seconds=update_interval_seconds),
         )
         self._api = api
+        self.source = source
         self.cust_code = cust_code
         self.cust_name = cust_name
         self.tier_config = tier_config
@@ -374,36 +369,36 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
         self.balance_threshold = balance_threshold
 
     async def _async_update_data(self) -> ZrGasDeviceData:
-        """Fetch data from the ZR Gas API.
+        """Fetch data from the ZR Gas API (source-agnostic).
 
-        Uses asyncio.gather for parallel data fetching (inspired by
-        ha_hfcrgas/sycfgas). On error, preserves previous data to
-        avoid sensor state loss.
-
-        Returns:
-            Aggregated device data for sensor updates.
+        Uses asyncio.gather for parallel data fetching: customer detail,
+        bills, and (for 缴费端) meter info. Meter failures downgrade to
+        empty enrichment; bill failures downgrade to an empty list.
 
         Raises:
             ConfigEntryAuthFailed: If the access token has expired.
             UpdateFailed: If the API call fails for other reasons.
         """
         try:
-            # Parallel data fetching for better performance
             now = dt_util.now()
             current_period = now.strftime("%Y%m")
             # 可配置的账单查询范围
             start_year = now.year - self.bill_years
             start_period = f"{start_year}{now.strftime('%m')}"
 
-            detail_task = self._api.get_cust_info(
-                self.cust_code, self.cust_name
-            )
+            detail_task = self._api.get_cust_info(self.cust_code, self.cust_name)
             bills_task = self._api.get_customer_money_list(
                 self.cust_code, start_period, current_period
             )
+            meter_task = self._api.get_meter_info(self.cust_code)
+            payment_task = self._api.get_payment_log(self.cust_code)
 
-            detail, bills = await asyncio.gather(
-                detail_task, bills_task, return_exceptions=True
+            detail, bills, meter, payments = await asyncio.gather(
+                detail_task,
+                bills_task,
+                meter_task,
+                payment_task,
+                return_exceptions=True,
             )
 
             # Handle exceptions from parallel tasks
@@ -420,10 +415,18 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                     f"Authentication failed for {self.cust_name}: {bills}"
                 ) from bills
             if isinstance(bills, Exception):
-                _LOGGER.warning(
-                    "Failed to fetch bills for %s: %s", self.cust_name, bills
-                )
+                _LOGGER.warning("Failed to fetch bills for %s: %s", self.cust_name, bills)
                 bills = []
+            if isinstance(meter, Exception):
+                # Meter enrichment is best-effort (缴费端 only)
+                _LOGGER.debug("Meter info unavailable for %s: %s", self.cust_name, meter)
+                meter = None
+            if isinstance(payments, Exception):
+                # Payment log is best-effort (借鉴 hazr 端点，失败静默降级)
+                _LOGGER.debug("Payment log unavailable for %s: %s", self.cust_name, payments)
+                payments = []
+            payment_list = payments if isinstance(payments, list) else []
+            last_payment = payment_list[0] if payment_list else None
 
             # Find the most recent bill for monthly usage/cost
             monthly_usage = 0.0
@@ -456,7 +459,11 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 _calculate_annual_usage(monthly_stats, self.tier_config)
             )
 
+            # 单价: 来源字段优先（缴费端 price），回退当月账单单价
+            gas_price = detail.gas_price or unit_price
+
             return ZrGasDeviceData(
+                source=self.source,
                 balance=detail.balance,
                 cust_code=detail.cust_code,
                 cust_name=detail.cust_name,
@@ -466,6 +473,11 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 period=period,
                 unit_price=unit_price,
                 owe_money=detail.owe_money,
+                new_owe_money=detail.new_owe_money,
+                award_money=detail.award_money,
+                gas_price=gas_price,
+                max_gas=detail.max_gas,
+                cust_type=detail.cust_type,
                 last_record=detail.last_record,
                 qty_meter_balance=detail.qty_meter_balance,
                 purch_times=detail.purch_times,
@@ -476,6 +488,13 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 comp_name=detail.comp_name,
                 cust_status=detail.cust_status,
                 fee=detail.fee,
+                card_type=meter.card_type if meter else "",
+                vent_date=meter.vent_date if meter else "",
+                bar_code=meter.bar_code if meter else "",
+                meter_loc=meter.meter_loc if meter else "",
+                last_payment=last_payment.amount if last_payment else 0.0,
+                last_payment_time=last_payment.pay_time if last_payment else "",
+                payment_history=payment_list,
                 annual_usage=annual_usage,
                 current_tier=current_tier,
                 current_tier_price=current_tier_price,
@@ -505,18 +524,12 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 f"Authentication failed for {self.cust_name}: {err}"
             ) from err
         except ZrGasApiError as err:
-            raise UpdateFailed(
-                f"Error fetching data for {self.cust_name}: {err}"
-            ) from err
+            raise UpdateFailed(f"Error fetching data for {self.cust_name}: {err}") from err
         except Exception as err:
-            raise UpdateFailed(
-                f"Unexpected error for {self.cust_name}: {err}"
-            ) from err
+            raise UpdateFailed(f"Unexpected error for {self.cust_name}: {err}") from err
         else:
             # Data fetched successfully — clear any previous token-expired issue
-            ir.async_delete_issue(
-                self.hass, DOMAIN, f"token_expired_{self.cust_code}"
-            )
+            ir.async_delete_issue(self.hass, DOMAIN, f"token_expired_{self.cust_code}")
 
             # ── Balance threshold alert ────────────────────────
             if detail.balance < self.balance_threshold:
@@ -534,14 +547,13 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                     },
                 )
             else:
-                ir.async_delete_issue(
-                    self.hass, DOMAIN, f"balance_low_{self.cust_code}"
-                )
+                ir.async_delete_issue(self.hass, DOMAIN, f"balance_low_{self.cust_code}")
 
             _LOGGER.debug(
-                "Data updated for %s: balance=%.2f, usage=%.2f, cost=%.2f, "
-                "annual=%.2f, tier=%d",
+                "Data updated for %s (source=%s): balance=%.2f, usage=%.2f, "
+                "cost=%.2f, annual=%.2f, tier=%d",
                 self.cust_name,
+                self.source,
                 detail.balance,
                 monthly_usage,
                 monthly_cost,
