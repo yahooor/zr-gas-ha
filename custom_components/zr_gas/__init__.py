@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -174,22 +175,32 @@ def _calculate_tier_cycle_start(tier_cycle_start_md: str) -> str:
     return datetime(now.year - 1, sm, sd, tzinfo=dt_util.DEFAULT_TIME_ZONE).strftime("%Y-%m-%d")
 
 
+@dataclass
+class AnnualSummary:
+    """当前阶梯周期的累计汇总。"""
+
+    usage: float  # 累计用气量 (m³)
+    cost: float  # 累计费用 (CNY)
+    tier: int  # 当前档位 1/2/3
+    tier_price: float  # 当前档位单价 (CNY/m³)
+    cycle_start: str  # 周期起始日 YYYY-MM-DD
+    remaining: float  # 当前档位剩余额度 (m³，第三档为 inf)
+
+
 def _calculate_annual_usage(
     monthly_stats: list[MonthlyStat],
     tier_config: TierConfig,
-) -> tuple[float, int, float, str]:
-    """计算当前阶梯周期的累计用气量。
+) -> AnnualSummary:
+    """计算当前阶梯周期的累计用气量与费用。
 
-    从阶梯周期起始月份开始累加月度用量。
-
-    Returns:
-        (annual_usage, current_tier, current_tier_price, cycle_start)
+    从阶梯周期起始月份开始累加月度用量与费用。
     """
     cycle_start = _calculate_tier_cycle_start(tier_config.tier_cycle_start_md)
     cycle_year = int(cycle_start[:4])
     cycle_month = int(cycle_start[5:7])
 
     annual_usage = 0.0
+    annual_cost = 0.0
     for ms in monthly_stats:
         try:
             ms_year = int(ms.month[:4])
@@ -201,9 +212,35 @@ def _calculate_annual_usage(
         cycle_val = cycle_year * 12 + cycle_month
         if ms_val >= cycle_val:
             annual_usage += ms.gas_num
+            annual_cost += ms.gas_cost
 
     tier_num, tier_price, remaining = tier_config.get_tier_info(annual_usage)
-    return annual_usage, tier_num, tier_price, cycle_start, remaining
+    return AnnualSummary(
+        usage=annual_usage,
+        cost=annual_cost,
+        tier=tier_num,
+        tier_price=tier_price,
+        cycle_start=cycle_start,
+        remaining=remaining,
+    )
+
+
+def _pick_bills(
+    bill_list: list[ZrGasBill], current_period: str
+) -> tuple[ZrGasBill | None, ZrGasBill | None]:
+    """从账单列表选出当前账单与上一账单。
+
+    当前账单优先匹配 current_period，否则取最新一条；
+    上一账单为排序后当前账单的前一条（月付即上月，季付即上季）。
+    """
+    bills = sorted(bill_list, key=lambda b: b.period)
+    current = next((b for b in bills if b.period == current_period), None)
+    matched = current or (bills[-1] if bills else None)
+    previous = None
+    if matched is not None:
+        idx = bills.index(matched)
+        previous = bills[idx - 1] if idx > 0 else None
+    return matched, previous
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -428,41 +465,41 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             payment_list = payments if isinstance(payments, list) else []
             last_payment = payment_list[0] if payment_list else None
 
-            # Find the most recent bill for monthly usage/cost
+            # Find the most recent bill + previous bill for monthly usage/cost
             monthly_usage = 0.0
             monthly_cost = 0.0
             period = current_period
             unit_price = 0.0
+            last_month_usage = 0.0
+            last_month_cost = 0.0
+            last_bill_period = ""
 
             bill_list: list[ZrGasBill] = bills if isinstance(bills, list) else []
             if bill_list:
-                bill_list.sort(key=lambda b: b.period)
-                # Try to find the bill matching the current period first
-                current_bill = None
-                for bill in bill_list:
-                    if bill.period == current_period:
-                        current_bill = bill
-                        break
-                # Fallback to the last bill if no exact period match
-                matched_bill = current_bill or bill_list[-1]
-                monthly_usage = matched_bill.usage_volume
-                monthly_cost = matched_bill.usage_amount
-                if matched_bill.period:
-                    period = matched_bill.period
-                unit_price = matched_bill.unit_price
+                matched_bill, prev_bill = _pick_bills(bill_list, current_period)
+                if matched_bill is not None:
+                    monthly_usage = matched_bill.usage_volume
+                    monthly_cost = matched_bill.usage_amount
+                    if matched_bill.period:
+                        period = matched_bill.period
+                    unit_price = matched_bill.unit_price
+                if prev_bill is not None:
+                    last_month_usage = prev_bill.usage_volume
+                    last_month_cost = prev_bill.usage_amount
+                    last_bill_period = prev_bill.period
 
             # ── 统计计算 ──────────────────────────────────────
             monthly_stats = _calculate_monthly_stats(bill_list)
             yearly_stats = _calculate_yearly_stats(monthly_stats)
 
             # ── 阶梯气价计算 ──────────────────────────────────
-            (
-                annual_usage,
-                current_tier,
-                current_tier_price,
-                tier_cycle_start,
-                tier_remaining,
-            ) = _calculate_annual_usage(monthly_stats, self.tier_config)
+            summary = _calculate_annual_usage(monthly_stats, self.tier_config)
+            annual_usage = summary.usage
+            annual_cost = summary.cost
+            current_tier = summary.tier
+            current_tier_price = summary.tier_price
+            tier_cycle_start = summary.cycle_start
+            tier_remaining = summary.remaining
 
             # 单价: 来源字段优先（缴费端 price / 当月账单单价），
             # 均缺失时从最近账单派生（实付/用量，预付费账户服务端不给单价）
@@ -505,6 +542,11 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 last_payment=last_payment.amount if last_payment else 0.0,
                 last_payment_time=last_payment.pay_time if last_payment else "",
                 payment_history=payment_list,
+                last_month_usage=last_month_usage,
+                last_month_cost=last_month_cost,
+                last_bill_period=last_bill_period,
+                annual_cost=annual_cost,
+                tier_remaining_inf=tier_remaining == float("inf"),
                 annual_usage=annual_usage,
                 current_tier=current_tier,
                 current_tier_price=current_tier_price,

@@ -269,6 +269,63 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
             ],
         },
     ),
+    # ── 上一账单周期（月付即上月；季付即上季） ────────────────────
+    ZrGasSensorEntityDescription(
+        key="last_month_usage",
+        translation_key="last_month_usage",
+        device_class=SensorDeviceClass.GAS,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        icon="mdi:fire-alert",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.last_month_usage,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "bill_period": data.last_bill_period,
+        },
+    ),
+    ZrGasSensorEntityDescription(
+        key="last_month_cost",
+        translation_key="last_month_cost",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement="CNY",
+        icon="mdi:cash-remove",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.last_month_cost,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "bill_period": data.last_bill_period,
+        },
+    ),
+    ZrGasSensorEntityDescription(
+        key="annual_cost",
+        translation_key="annual_cost",
+        device_class=SensorDeviceClass.MONETARY,
+        native_unit_of_measurement="CNY",
+        icon="mdi:cash-multiple",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.annual_cost,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            **_stats_attributes(data),
+            "tier_cycle_start": data.tier_cycle_start,
+        },
+    ),
+    ZrGasSensorEntityDescription(
+        key="tier_remaining",
+        translation_key="tier_remaining",
+        device_class=SensorDeviceClass.GAS,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        icon="mdi:gas-cylinder-outline",
+        suggested_display_precision=1,
+        value_fn=lambda data: None if data.tier_remaining_inf else data.tier_remaining,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "current_tier": data.current_tier,
+            "current_tier_price": data.current_tier_price,
+            "annual_usage": data.annual_usage,
+            "unlimited": data.tier_remaining_inf,
+        },
+    ),
     # ── 年度累计用气量传感器（阶梯周期内累计） ────────────────────
     ZrGasSensorEntityDescription(
         key="annual_usage",

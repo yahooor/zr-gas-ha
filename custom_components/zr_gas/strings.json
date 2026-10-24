@@ -148,6 +148,18 @@
       "last_payment": {
         "name": "最近缴费"
       },
+      "last_month_usage": {
+        "name": "上月用气量"
+      },
+      "last_month_cost": {
+        "name": "上月费用"
+      },
+      "annual_cost": {
+        "name": "年度累计费用"
+      },
+      "tier_remaining": {
+        "name": "阶梯剩余额度"
+      },
       "annual_usage": {
         "name": "年度累计用量"
       }

@@ -233,6 +233,13 @@ class ZrGasDeviceData:
     last_payment: float = 0.0  # 最近一次缴费金额 (CNY)
     last_payment_time: str = ""
     payment_history: list[ZrGasPayment] = field(default_factory=list)
+    # 上一账单周期（月付用户即上月；季付用户即上季）
+    last_month_usage: float = 0.0  # 上期用气量 (m³)
+    last_month_cost: float = 0.0  # 上期费用 (CNY)
+    last_bill_period: str = ""  # 上期账期 YYYYMM
+    # 年度费用与阶梯额度
+    annual_cost: float = 0.0  # 年度累计费用 (CNY)
+    tier_remaining_inf: bool = False  # 第三档无上限标记
     # 阶梯气价
     annual_usage: float = 0.0  # 年度累计用气量 (m³)
     current_tier: int = 1  # 当前阶梯 1/2/3

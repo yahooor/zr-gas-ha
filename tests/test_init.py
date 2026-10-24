@@ -24,6 +24,7 @@ _calculate_monthly_stats = zr_gas._calculate_monthly_stats
 _calculate_yearly_stats = zr_gas._calculate_yearly_stats
 _calculate_tier_cycle_start = zr_gas._calculate_tier_cycle_start
 _calculate_annual_usage = zr_gas._calculate_annual_usage
+_pick_bills = zr_gas._pick_bills
 
 
 # ── _calculate_monthly_stats ──────────────────────────────────────────
@@ -193,8 +194,12 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="01-01")
         fake_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, tier_price, cycle_start, _tier_remaining = (
-                _calculate_annual_usage(monthly, tier_config)
+            summary = _calculate_annual_usage(monthly, tier_config)
+            annual_usage, tier_num, tier_price, cycle_start = (
+                summary.usage,
+                summary.tier,
+                summary.tier_price,
+                summary.cycle_start,
             )
 
         assert annual_usage == pytest.approx(100.0)
@@ -206,8 +211,12 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="01-01")
         fake_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, tier_price, cycle_start, _tier_remaining = (
-                _calculate_annual_usage([], tier_config)
+            summary = _calculate_annual_usage([], tier_config)
+            annual_usage, tier_num, tier_price, cycle_start = (
+                summary.usage,
+                summary.tier,
+                summary.tier_price,
+                summary.cycle_start,
             )
 
         assert annual_usage == 0.0
@@ -226,9 +235,8 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="07-01")
         fake_now = datetime(2026, 3, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, _tier_price, cycle_start, _tier_remaining = (
-                _calculate_annual_usage(monthly, tier_config)
-            )
+            summary = _calculate_annual_usage(monthly, tier_config)
+            annual_usage, tier_num, cycle_start = (summary.usage, summary.tier, summary.cycle_start)
 
         assert annual_usage == pytest.approx(100.0)  # 30+50+20, excludes 2025-06
         assert tier_num == 1
@@ -275,15 +283,63 @@ class TestTierRemaining:
     def test_remaining_in_tier_1(self):
         monthly = [MonthlyStat(month="2026-05", gas_num=193.0, gas_cost=801.04)]
         cfg = TierConfig()
-        usage, tier, _price, _start, remaining = _calculate_annual_usage(monthly, cfg)
-        assert usage == 193.0 if tier == 1 else usage == 2000.0
+        summary = _calculate_annual_usage(monthly, cfg)
+        usage, tier, remaining = summary.usage, summary.tier, summary.remaining
+        assert usage == (193.0 if tier == 1 else 2000.0)
         assert tier == 1
         assert remaining == pytest.approx(400 - 193)
 
     def test_remaining_zero_in_top_tier(self):
         monthly = [MonthlyStat(month="2026-05", gas_num=2000.0, gas_cost=8000.0)]
         cfg = TierConfig()
-        usage, tier, _price, _start, remaining = _calculate_annual_usage(monthly, cfg)
-        assert usage == 193.0 if tier == 1 else usage == 2000.0
+        summary = _calculate_annual_usage(monthly, cfg)
+        usage, tier, remaining = summary.usage, summary.tier, summary.remaining
+        assert usage == (193.0 if tier == 1 else 2000.0)
         assert tier == 3
         assert remaining == float("inf")
+
+
+# ── v2.2.0: _pick_bills（当前/上一账单）与 AnnualSummary 费用 ──────────
+
+
+class TestPickBills:
+    def _b(self, period, qty, amount):
+        return ZrGasBill(period=period, usage_volume=qty, usage_amount=amount, unit_price=2.99)
+
+    def test_current_period_matched(self):
+        bills = [
+            self._b("202605", 49, 201.39),
+            self._b("202610", 10, 30),
+            self._b("202608", 73, 300.03),
+        ]
+        matched, prev = _pick_bills(bills, "202610")
+        assert matched.usage_volume == 10
+        assert prev.period == "202608"
+
+    def test_fallback_to_latest(self):
+        bills = [self._b("202605", 49, 201.39), self._b("202608", 73, 300.03)]
+        matched, prev = _pick_bills(bills, "202610")  # 当前月无账单
+        assert matched.usage_volume == 73
+        assert prev.usage_volume == 49
+        assert prev.period == "202605"
+
+    def test_single_bill_no_previous(self):
+        matched, prev = _pick_bills([self._b("202608", 73, 300.03)], "202610")
+        assert matched.usage_volume == 73
+        assert prev is None
+
+    def test_empty(self):
+        assert _pick_bills([], "202610") == (None, None)
+
+
+class TestAnnualSummaryCost:
+    def test_cost_summed_within_cycle(self):
+        monthly = [
+            MonthlyStat(month="2025-12", gas_num=30.0, gas_cost=90.0),  # 上周期，不计
+            MonthlyStat(month="2026-05", gas_num=49.0, gas_cost=201.39),
+            MonthlyStat(month="2026-08", gas_num=73.0, gas_cost=300.03),
+        ]
+        summary = _calculate_annual_usage(monthly, TierConfig())
+        assert summary.usage == pytest.approx(122.0)
+        assert summary.cost == pytest.approx(501.42)
+        assert summary.tier == 1

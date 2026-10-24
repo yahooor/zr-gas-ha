@@ -13,7 +13,11 @@
       "purch_times": "mdi:counter",
       "last_record_time": "mdi:clock-outline",
       "last_payment": "mdi:receipt-text-check",
-      "annual_usage": "mdi:chart-line"
+      "annual_usage": "mdi:chart-line",
+      "last_month_usage": "mdi:fire-alert",
+      "last_month_cost": "mdi:cash-remove",
+      "annual_cost": "mdi:cash-multiple",
+      "tier_remaining": "mdi:gas-cylinder-outline"
     }
   }
 }

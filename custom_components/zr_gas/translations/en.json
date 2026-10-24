@@ -148,6 +148,18 @@
       "last_payment": {
         "name": "Last payment"
       },
+      "last_month_usage": {
+        "name": "Last month usage"
+      },
+      "last_month_cost": {
+        "name": "Last month cost"
+      },
+      "annual_cost": {
+        "name": "Annual cost"
+      },
+      "tier_remaining": {
+        "name": "Tier remaining"
+      },
       "annual_usage": {
         "name": "Annual usage"
       }
