@@ -17,7 +17,7 @@
  *   show_meter: true        # show meter info footer (default true)
  */
 
-const CARD_VERSION = '2.0.0';
+const CARD_VERSION = '2.1.0';
 
 class ZrGasCard extends HTMLElement {
   static get styles() {
@@ -287,11 +287,15 @@ class ZrGasCard extends HTMLElement {
       if (annualUsage && annualUsage.state !== 'unavailable') {
         const tier = annualAttrs.current_tier || 1;
         const tierPrice = annualAttrs.current_tier_price;
+        const remaining = annualAttrs.tier_remaining;
+        const avg = annualAttrs.monthly_avg;
         const cycle = annualAttrs.tier_cycle_start || '';
+        const remainTxt = Number.isFinite(remaining) ? ` · 余 ${remaining} m³` : '';
+        const avgTxt = Number.isFinite(avg) ? ` · 均衡 ${avg} m³/月` : '';
         gridHtml += `
         <div class="tier-box">
-          <span>年度累计 <b>${parseFloat(annualUsage.state).toFixed(1)}</b> m³${cycle ? `（自 ${cycle}）` : ''}</span>
-          <span>第${tier}档${tierPrice ? ` · ${tierPrice}元/m³` : ''} <span class="tier-badge">阶梯</span></span>
+          <span>年度累计 <b>${parseFloat(annualUsage.state).toFixed(1)}</b> m³${avgTxt}${cycle ? `<span class="item-unit">（自 ${cycle}）</span>` : ''}</span>
+          <span>第${tier}档${tierPrice ? ` · ${tierPrice}元/m³` : ''}${remainTxt} <span class="tier-badge">阶梯</span></span>
         </div>`;
       }
     }

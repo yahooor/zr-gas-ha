@@ -97,6 +97,8 @@ async def async_get_device_diagnostics(
                 "current_tier": data.current_tier,
                 "current_tier_price": data.current_tier_price,
                 "tier_cycle_start": data.tier_cycle_start,
+                "tier_remaining": data.tier_remaining,
+                "price_source": data.price_source,
                 "monthly_stats_count": len(data.monthly_stats),
                 "yearly_stats_count": len(data.yearly_stats),
             }

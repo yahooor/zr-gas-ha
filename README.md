@@ -91,6 +91,16 @@ entity: sensor.zhong_ran_ran_qi_XXXX_balance
 
 安装：`www/zr_gas_card/zr-gas-card.js` 复制到 HA 的 `www/zr_gas_card/`，资源注册 `/local/zr_gas_card/zr-gas-card.js`（JavaScript Module）。
 
+## 接入能源面板
+
+年度累计用量传感器（`annual_usage`）带 `total` state_class 与 m³ 单位，可直接加入 HA 能源面板的燃气统计：
+
+1. **设置** → **仪表盘** → **能源** → **燃气**
+2. 选择「年度累计用量」实体（建议选 tracker 为「不使用统计」+ 按实体记录）
+3. 单价可手动填当地阶梯价（或用「燃气单价」传感器做动态价）
+
+月用量/月费用传感器为账单快照（账期滞后），不适合作为能源统计源；历史明细见 `annual_usage` 的 `monthly_stats` 属性。
+
 ## API 连通性验证
 
 仓库附带独立验证脚本（无需 HA 环境）：
