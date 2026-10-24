@@ -237,6 +237,8 @@ class ZrGasDeviceData:
     annual_usage: float = 0.0  # 年度累计用气量 (m³)
     current_tier: int = 1  # 当前阶梯 1/2/3
     current_tier_price: float = 0.0  # 当前阶梯单价 (CNY/m³)
+    tier_remaining: float = 0.0  # 当前阶梯剩余额度 (m³)
+    price_source: str = ""  # 单价来源: api / derived（账单推算）
     tier_cycle_start: str = ""  # 当前阶梯周期起始日 YYYY-MM-DD
     # 统计
     monthly_stats: list[MonthlyStat] = field(default_factory=list)

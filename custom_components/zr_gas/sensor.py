@@ -187,7 +187,10 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         icon="mdi:tag-outline",
         suggested_display_precision=2,
         value_fn=lambda data: data.gas_price or None,
-        attributes_fn=lambda data: _device_attributes(data),
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "price_source": data.price_source or "api",
+        },
     ),
     ZrGasSensorEntityDescription(
         key="max_gas",
@@ -281,10 +284,27 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
             **_stats_attributes(data),
             "current_tier": data.current_tier,
             "current_tier_price": data.current_tier_price,
+            "tier_remaining": round(data.tier_remaining, 1),
+            "monthly_avg": _monthly_avg(data),
             "tier_cycle_start": data.tier_cycle_start,
         },
     ),
 )
+
+
+def _monthly_avg(data: ZrGasDeviceData) -> float | None:
+    """阶梯周期内月均用量（已过整月数 ≥1 时才有意义）。"""
+    if not data.tier_cycle_start or data.annual_usage <= 0:
+        return None
+    try:
+        import homeassistant.util.dt as _dt
+
+        start = _dt.parse_datetime(f"{data.tier_cycle_start}T00:00:00")
+        now = _dt.now()
+        months = max(1, (now.year - start.year) * 12 + (now.month - start.month))
+        return round(data.annual_usage / months, 1)
+    except Exception:
+        return None
 
 
 class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEntity):

@@ -193,8 +193,8 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="01-01")
         fake_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, tier_price, cycle_start = _calculate_annual_usage(
-                monthly, tier_config
+            annual_usage, tier_num, tier_price, cycle_start, _tier_remaining = (
+                _calculate_annual_usage(monthly, tier_config)
             )
 
         assert annual_usage == pytest.approx(100.0)
@@ -206,8 +206,8 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="01-01")
         fake_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, tier_price, cycle_start = _calculate_annual_usage(
-                [], tier_config
+            annual_usage, tier_num, tier_price, cycle_start, _tier_remaining = (
+                _calculate_annual_usage([], tier_config)
             )
 
         assert annual_usage == 0.0
@@ -226,8 +226,8 @@ class TestCalculateAnnualUsage:
         tier_config = TierConfig(tier_cycle_start_md="07-01")
         fake_now = datetime(2026, 3, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         with patch("zr_gas.dt_util.now", return_value=fake_now):
-            annual_usage, tier_num, _tier_price, cycle_start = _calculate_annual_usage(
-                monthly, tier_config
+            annual_usage, tier_num, _tier_price, cycle_start, _tier_remaining = (
+                _calculate_annual_usage(monthly, tier_config)
             )
 
         assert annual_usage == pytest.approx(100.0)  # 30+50+20, excludes 2025-06
@@ -266,3 +266,24 @@ class TestBuildApiClient:
 
         api = build_api_client(None, "mp", "tok", "uid")
         assert isinstance(api, ZrGasMpApi)
+
+
+# ── v2.1.0: tier_remaining（阶梯剩余额度） ────────────────────────────
+
+
+class TestTierRemaining:
+    def test_remaining_in_tier_1(self):
+        monthly = [MonthlyStat(month="2026-05", gas_num=193.0, gas_cost=801.04)]
+        cfg = TierConfig()
+        usage, tier, _price, _start, remaining = _calculate_annual_usage(monthly, cfg)
+        assert usage == 193.0 if tier == 1 else usage == 2000.0
+        assert tier == 1
+        assert remaining == pytest.approx(400 - 193)
+
+    def test_remaining_zero_in_top_tier(self):
+        monthly = [MonthlyStat(month="2026-05", gas_num=2000.0, gas_cost=8000.0)]
+        cfg = TierConfig()
+        usage, tier, _price, _start, remaining = _calculate_annual_usage(monthly, cfg)
+        assert usage == 193.0 if tier == 1 else usage == 2000.0
+        assert tier == 3
+        assert remaining == float("inf")

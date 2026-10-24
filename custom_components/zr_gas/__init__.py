@@ -202,8 +202,8 @@ def _calculate_annual_usage(
         if ms_val >= cycle_val:
             annual_usage += ms.gas_num
 
-    tier_num, tier_price, _remaining = tier_config.get_tier_info(annual_usage)
-    return annual_usage, tier_num, tier_price, cycle_start
+    tier_num, tier_price, remaining = tier_config.get_tier_info(annual_usage)
+    return annual_usage, tier_num, tier_price, cycle_start, remaining
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -456,12 +456,21 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             yearly_stats = _calculate_yearly_stats(monthly_stats)
 
             # ── 阶梯气价计算 ──────────────────────────────────
-            annual_usage, current_tier, current_tier_price, tier_cycle_start = (
-                _calculate_annual_usage(monthly_stats, self.tier_config)
-            )
+            (
+                annual_usage,
+                current_tier,
+                current_tier_price,
+                tier_cycle_start,
+                tier_remaining,
+            ) = _calculate_annual_usage(monthly_stats, self.tier_config)
 
-            # 单价: 来源字段优先（缴费端 price），回退当月账单单价
+            # 单价: 来源字段优先（缴费端 price / 当月账单单价），
+            # 均缺失时从最近账单派生（实付/用量，预付费账户服务端不给单价）
             gas_price = detail.gas_price or unit_price
+            price_source = "api" if gas_price else ""
+            if not gas_price and monthly_usage > 0 and monthly_cost > 0:
+                gas_price = round(monthly_cost / monthly_usage, 3)
+                price_source = "derived" if gas_price else ""
 
             return ZrGasDeviceData(
                 source=self.source,
@@ -500,6 +509,8 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 current_tier=current_tier,
                 current_tier_price=current_tier_price,
                 tier_cycle_start=tier_cycle_start,
+                tier_remaining=tier_remaining,
+                price_source=price_source,
                 monthly_stats=monthly_stats,
                 yearly_stats=yearly_stats,
             )
