@@ -17,7 +17,7 @@
  *   show_meter: true        # show meter info footer (default true)
  */
 
-const CARD_VERSION = '2.1.0';
+const CARD_VERSION = '2.1.3';
 
 class ZrGasCard extends HTMLElement {
   static get styles() {
@@ -193,9 +193,20 @@ class ZrGasCard extends HTMLElement {
 
   // 从主实体 ID 推导同设备兄弟实体：
   // sensor.zhong_ran_xx_balance → sensor.zhong_ran_xx_<key>
+  // 兼容 HA 翻译 slug（amount_owed 等）与原始 key（owe_money 等）
   _sibling(key) {
     const base = this.config.entity.replace(/_balance$/, '');
-    return this._hass.states[`${base}_${key}`];
+    const candidates = {
+      owe_money: ['amount_owed', 'owe_money'],
+      qty_meter_balance: ['gas_volume_balance', 'qty_meter_balance'],
+      purch_times: ['purchase_count', 'purch_times'],
+      last_record: ['meter_reading', 'last_record'],
+    }[key] || [key];
+    for (const k of candidates) {
+      const st = this._hass.states[`${base}_${k}`];
+      if (st) return st;
+    }
+    return undefined;
   }
 
   _fmt(state, digits = 2, unit = '') {
@@ -209,7 +220,7 @@ class ZrGasCard extends HTMLElement {
 
   _renderSkeleton() {
     this.shadowRoot.innerHTML = `
-      <style>${ZrGasCard.styles()}</style>
+      <style>${ZrGasCard.styles}</style>
       <div class="card-title">中燃在线</div>
       <div style="color:var(--secondary-text-color,#757575);padding:16px 0;">加载中…</div>
     `;
@@ -221,7 +232,7 @@ class ZrGasCard extends HTMLElement {
     const main = this._hass.states[this.config.entity];
     if (!main) {
       this.shadowRoot.innerHTML = `
-        <style>${ZrGasCard.styles()}</style>
+        <style>${ZrGasCard.styles}</style>
         <div class="card-title">中燃在线</div>
         <div style="color:var(--error-color,#f44336);padding:16px 0;">未找到实体 ${this.config.entity}</div>
       `;
@@ -331,7 +342,7 @@ class ZrGasCard extends HTMLElement {
     }
 
     this.shadowRoot.innerHTML = `
-      <style>${ZrGasCard.styles()}</style>
+      <style>${ZrGasCard.styles}</style>
       <div class="card-header">
         <div class="card-title">
           <svg class="card-icon" viewBox="0 0 24 24" fill="currentColor">
