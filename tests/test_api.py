@@ -163,9 +163,7 @@ class TestStatusNormalization:
     @pytest.mark.asyncio
     async def test_api_error_raw_body_truncated(self):
         """响应体过长时截断到 500 字符。"""
-        api, _ = self._api(
-            {"status": 2, "message": "", "data": {"k": "x" * 2000}}
-        )
+        api, _ = self._api({"status": 2, "message": "", "data": {"k": "x" * 2000}})
         with pytest.raises(ZrGasApiError) as exc_info:
             await api._post("http://x", {})
         raw_part = str(exc_info.value).split("| raw=")[1]
