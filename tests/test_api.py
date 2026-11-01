@@ -648,6 +648,45 @@ class TestRealPayloadMappings:
         assert bills == []
 
     @pytest.mark.asyncio
+    async def test_money_list_binding_error_returns_empty_without_fallback(self):
+        """v2.2.2: 整段查询命中绑定失效错误 → 直接返回空列表，不做分年重试。"""
+        session = _FakeSession({"status": 2, "msg": "请先完成燃气用户绑定，再办理燃气业务。"})
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "202201", "202612")
+
+        assert bills == []
+        # 仅 1 次整段请求，无分年降级（否则 2022-2026 共 5 次）
+        assert len(session.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_money_list_by_year_binding_error_breaks_loop(self):
+        """v2.2.2: 分年循环命中绑定失效错误 → break 跳过剩余年份。
+
+        前置设计：2022/2023 成功返回账单、2024 命中绑定错误，
+        2025/2026 不应再被请求；已合并的 2022/2023 账单正常返回。
+        """
+        ok_2022 = {
+            "status": 1,
+            "data": [{"recordMonth": "202206", "curQty": "10", "receivable": "30"}],
+        }
+        ok_2023 = {
+            "status": 1,
+            "data": [{"recordMonth": "202310", "curQty": "12", "receivable": "36"}],
+        }
+        binding_fail = {"status": 2, "msg": "请先完成燃气用户绑定，再办理燃气业务。"}
+        session = _FakeSession([ok_2022, ok_2023, binding_fail])
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api._query_money_list_by_year("C1", "202201", "202612")
+
+        # 2022、2023、2024 三次请求后停止，2025/2026 不再请求
+        assert len(session.calls) == 3
+        assert session.calls[0][1]["data"]["startTime"] == "202201"
+        assert session.calls[2][1]["data"]["startTime"] == "202401"
+        assert len(bills) == 2
+        assert bills[0].period == "202206"
+        assert bills[1].period == "202310"
+
+    @pytest.mark.asyncio
     async def test_payment_log_real_field_names(self):
         """缴费记录实测字段: timeope / paytypedesc / qty=null / amount。"""
         session = _FakeSession(

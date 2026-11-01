@@ -63,6 +63,17 @@ from .models import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _is_binding_error(err: Exception) -> bool:
+    """判断异常消息是否为"燃气用户绑定失效"类业务错误。
+
+    服务端在账号绑定失效时返回
+    {"msg": "请先完成燃气用户绑定，再办理燃气业务。", "status": "2"}，
+    此类错误重试无意义（服务端状态不会改变），需短路降级。
+    """
+    text = str(err)
+    return "燃气用户绑定" in text or "绑定" in text
+
+
 class ZrGasApiError(Exception):
     """Base exception for ZR Gas API errors."""
 
@@ -340,7 +351,9 @@ class ZrGasBaseApi:
         status = result.get("status")
         code = result.get("code")
         success = result.get("success")
-        message = result.get("message", "")
+        # 服务端部分端点用 "msg" 而非 "message" 承载错误文案（如
+        # {"msg": "请先完成燃气用户绑定..."}），做回退提取；仅影响错误展示。
+        message = result.get("message") or result.get("msg") or ""
 
         if status in (1, "1") or code in (200, "200") or success is True:
             return result
@@ -663,6 +676,14 @@ class ZrGasMpApi(ZrGasBaseApi):
             # 认证类错误直接上抛，不做分年重试
             raise
         except ZrGasApiError as err:
+            # 绑定失效类错误重试无意义，短路返回空列表并给出明确指引
+            if _is_binding_error(err):
+                _LOGGER.warning(
+                    "燃气用户绑定已失效（服务端: %s），"
+                    "请到「中燃在线」小程序重新绑定燃气户；跳过账单查询",
+                    err,
+                )
+                return []
             _LOGGER.warning(
                 "getCustomerMoneyList full-range query failed (%s), "
                 "falling back to per-year slices",
@@ -726,6 +747,14 @@ class ZrGasMpApi(ZrGasBaseApi):
             except ZrGasAuthError:
                 raise
             except ZrGasApiError as err:
+                # 绑定失效类错误重试无意义，跳过剩余年份（已合并的账单正常返回）
+                if _is_binding_error(err):
+                    _LOGGER.warning(
+                        "燃气用户绑定已失效（服务端: %s），"
+                        "请到「中燃在线」小程序重新绑定燃气户；跳过后续年份账单查询",
+                        err,
+                    )
+                    break
                 # 单年失败不阻断其余年份（保持与账单 best-effort 语义一致）
                 _LOGGER.warning("getCustomerMoneyList per-year query failed (%s): %s", year, err)
                 continue
