@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import json
 import logging
 import time
 from typing import Any
@@ -355,7 +356,10 @@ class ZrGasBaseApi:
         if "登录" in message and "成功" not in message:
             raise ZrGasAuthError(f"Auth failed: {message}")
 
-        raise ZrGasApiError(f"API error (status={status}): {message}")
+        # 业务错误：把原始响应体（截断）附进异常消息，便于线上排查真因。
+        # 仅含响应体，不含请求头（避免泄漏 accessToken）。
+        raw_body = json.dumps(result, ensure_ascii=False)[:500]
+        raise ZrGasApiError(f"API error (status={status}): {message} | raw={raw_body}")
 
 
 class ZrGasMpApi(ZrGasBaseApi):
@@ -643,11 +647,43 @@ class ZrGasMpApi(ZrGasBaseApi):
         start_time: str,
         end_time: str,
     ) -> list[ZrGasBill]:
-        """Query billing records in a YYYYMM range.
+        """Query billing records in a YYYYMM range (with per-year fallback).
 
-        Signature: md5(custCode+salt+ts). Fields: recordMonth / curQty /
-        receivable / price.
+        签名: md5(custCode+salt+ts)。字段: recordMonth / curQty / receivable /
+        price。
+
+        2026-10 线上问题：整段 [startTime, endTime] 跨度超过 1 年时服务端
+        返回 status=2 且 message 为空（静默拒绝）。因此先按整段查询一次；
+        失败（非认证类错误）时降级为按自然年切片循环查询后合并，模式与
+        缴费端 queryBillHistory 的按年查询一致。
         """
+        try:
+            result = await self._query_money_list_range(cust_code, start_time, end_time)
+        except ZrGasAuthError:
+            # 认证类错误直接上抛，不做分年重试
+            raise
+        except ZrGasApiError as err:
+            _LOGGER.warning(
+                "getCustomerMoneyList full-range query failed (%s), "
+                "falling back to per-year slices",
+                err,
+            )
+            return await self._query_money_list_by_year(cust_code, start_time, end_time)
+
+        _LOGGER.debug("getCustomerMoneyList raw data: %s", result.get("data"))
+        raw = result.get("data")
+        # 实测: data 可能是账单数组（旧格式），也可能是对象、账单藏于 payGasCheckList
+        if isinstance(raw, dict) and raw.get("payGasCheckList"):
+            raw = raw["payGasCheckList"]
+        return _parse_bill_items(raw)
+
+    async def _query_money_list_range(
+        self,
+        cust_code: str,
+        start_time: str,
+        end_time: str,
+    ) -> dict[str, Any]:
+        """Single full-range getCustomerMoneyList request (original behavior)."""
         url = f"{BASE_URL}{ENDPOINT_GET_BILLS}"
         timestamp = self._get_timestamp()
         signature = self._generate_signature(cust_code, timestamp)
@@ -660,13 +696,51 @@ class ZrGasMpApi(ZrGasBaseApi):
             "endTime": end_time,
         }
 
-        result = await self._post(url, data)
-        _LOGGER.debug("getCustomerMoneyList raw data: %s", result.get("data"))
-        raw = result.get("data")
-        # 实测: data 可能是账单数组（旧格式），也可能是对象、账单藏于 payGasCheckList
-        if isinstance(raw, dict) and raw.get("payGasCheckList"):
-            raw = raw["payGasCheckList"]
-        return _parse_bill_items(raw)
+        return await self._post(url, data)
+
+    async def _query_money_list_by_year(
+        self,
+        cust_code: str,
+        start_time: str,
+        end_time: str,
+    ) -> list[ZrGasBill]:
+        """按自然年切片循环查询 getCustomerMoneyList 并合并去重。
+
+        每年一次请求（startTime=年初, endTime=年末），签名方式不变。
+        合并结果按账单 period 去重，保留先出现的条目。
+        """
+        try:
+            start_year = int(start_time[:4])
+            end_year = int(end_time[:4])
+        except (ValueError, IndexError):
+            # 范围解析失败时退化为只查 end_time 所在年份
+            start_year = end_year = int(end_time[:4]) if end_time[:4].isdigit() else 2026
+
+        bills: list[ZrGasBill] = []
+        seen_periods: set[str] = set()
+        for year in range(start_year, end_year + 1):
+            year_start = f"{year}01"
+            year_end = f"{year}12"
+            try:
+                result = await self._query_money_list_range(cust_code, year_start, year_end)
+            except ZrGasAuthError:
+                raise
+            except ZrGasApiError as err:
+                # 单年失败不阻断其余年份（保持与账单 best-effort 语义一致）
+                _LOGGER.warning("getCustomerMoneyList per-year query failed (%s): %s", year, err)
+                continue
+
+            _LOGGER.debug("getCustomerMoneyList raw data (%s): %s", year, result.get("data"))
+            raw = result.get("data")
+            if isinstance(raw, dict) and raw.get("payGasCheckList"):
+                raw = raw["payGasCheckList"]
+            for bill in _parse_bill_items(raw):
+                if bill.period in seen_periods:
+                    continue
+                seen_periods.add(bill.period)
+                bills.append(bill)
+
+        return bills
 
 
 class ZrGasPayApi(ZrGasBaseApi):

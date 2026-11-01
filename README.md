@@ -124,6 +124,12 @@ python scripts/verify_api.py --sms --mobile <手机号>
 
 ## 更新日志
 
+### v2.2.1 — 修复账单拉取 status=2 报错
+
+- **修复**: 在线端 getCustomerMoneyList 整段查询（跨度 2 年）被服务端静默拒绝（status=2 且 message 为空），导致账单类传感器全为 0。现先按整段查询一次，失败（非认证类错误）时自动降级为按自然年切片循环查询并合并去重（与缴费端 queryBillHistory 按年模式一致）
+- **改进**: `_post()` 业务错误异常消息附带原始响应体（截断 500 字符），线上日志可直接看到服务端真实返回，便于排查
+- **测试**: 109 → 113（新增降级分年/去重/单年容错/认证错误不重试 4 个用例）
+
 ### v2.0.1 — 修复登录会话关闭告警
 
 - **修复**: 登录流程改用自建自管的 aiohttp 会话（保留真实 CookieJar），不再关闭 HA 托管会话（消除 `closes the Home Assistant aiohttp session` 日志告警）

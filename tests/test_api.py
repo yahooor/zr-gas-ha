@@ -152,6 +152,35 @@ class TestStatusNormalization:
             await api._post("http://x", {})
 
     @pytest.mark.asyncio
+    async def test_api_error_includes_raw_body(self):
+        """_post 抛错时异常消息必须携带原始响应体（截断），便于排查真因。"""
+        api, _ = self._api({"status": 2, "message": "", "data": {"foo": "bar"}})
+        with pytest.raises(ZrGasApiError) as exc_info:
+            await api._post("http://x", {})
+        assert "| raw=" in str(exc_info.value)
+        assert '"foo"' in str(exc_info.value)  # 响应体内容被包含
+
+    @pytest.mark.asyncio
+    async def test_api_error_raw_body_truncated(self):
+        """响应体过长时截断到 500 字符。"""
+        api, _ = self._api(
+            {"status": 2, "message": "", "data": {"k": "x" * 2000}}
+        )
+        with pytest.raises(ZrGasApiError) as exc_info:
+            await api._post("http://x", {})
+        raw_part = str(exc_info.value).split("| raw=")[1]
+        assert len(raw_part) <= 500
+
+    @pytest.mark.asyncio
+    async def test_api_error_raw_body_no_access_token_leak(self):
+        """异常消息只含响应体，不得泄漏请求头中的 accessToken。"""
+        session = _FakeSession({"status": 2, "message": ""})
+        api = ZrGasMpApi(session, access_token="SECRET_TOKEN", user_id="u")
+        with pytest.raises(ZrGasApiError) as exc_info:
+            await api._post("http://x", {})
+        assert "SECRET_TOKEN" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
     async def test_pay_client_sends_extra_headers(self):
         """缴费端 requests must carry accessFrom/Referer from const."""
         api, session = self._api({"status": 1, "data": {}}, ZrGasPayApi)
@@ -474,6 +503,151 @@ class TestRealPayloadMappings:
         assert bills[0].usage_volume == 73.0
         # 预付费账户 receivable=0 → 落到 received 实收
         assert bills[0].usage_amount == 300.03
+
+    # ── 分年切片降级（2026-10 status=2 修复） ─────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_money_list_full_range_success_no_fallback(self):
+        """整段查询成功时不触发分年降级（仅 1 次请求）。"""
+        session = _FakeSession(
+            {
+                "status": 1,
+                "data": [
+                    {"recordMonth": "202506", "curQty": "10", "receivable": "30"},
+                ],
+            }
+        )
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "202501", "202612")
+
+        assert len(session.calls) == 1
+        assert "getCustomerMoneyList" in session.calls[0][0]
+        assert len(bills) == 1
+        assert bills[0].period == "202506"
+
+    @pytest.mark.asyncio
+    async def test_money_list_full_range_fails_falls_back_per_year(self):
+        """整段查询失败（status=2 空消息）后按自然年切片重查并合并。"""
+        empty_2024 = {"status": 1, "data": []}  # 2024 年无账单
+        ok_2025 = {
+            "status": 1,
+            "data": [
+                {"recordMonth": "202511", "curQty": "20", "receivable": "60"},
+            ],
+        }
+        ok_2026 = {
+            "status": 1,
+            "data": {
+                "custCode": "C1",
+                "payGasCheckList": [
+                    {"recordMonth": "202605", "curQty": "49", "received": "201.39"},
+                ],
+            },
+        }
+        fail = {"status": 2, "message": ""}
+        session = _FakeSession([fail, empty_2024, ok_2025, ok_2026])
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "202411", "202611")
+
+        # 1 次整段 + 3 次分年（2024、2025、2026）
+        assert len(session.calls) == 4
+        # 第一次为整段原始请求
+        first_data = session.calls[0][1]["data"]
+        assert first_data["startTime"] == "202411"
+        assert first_data["endTime"] == "202611"
+        # 分年请求各自限定在自然年内
+        assert session.calls[1][1]["data"]["startTime"] == "202401"
+        assert session.calls[1][1]["data"]["endTime"] == "202412"
+        assert session.calls[2][1]["data"]["startTime"] == "202501"
+        assert session.calls[2][1]["data"]["endTime"] == "202512"
+        assert session.calls[3][1]["data"]["startTime"] == "202601"
+        assert session.calls[3][1]["data"]["endTime"] == "202612"
+        # 分年请求签名仍是 md5(custCode+salt+ts)
+        year_data = session.calls[1][1]["data"]
+        expected_sig = hashlib.md5(f"C1{SIGN_SALT}{year_data['timeStamp']}".encode()).hexdigest()
+        assert year_data["signature"] == expected_sig
+
+        assert len(bills) == 2
+        assert bills[0].period == "202511"
+        assert bills[1].period == "202605"
+        assert bills[1].usage_amount == 201.39
+
+    @pytest.mark.asyncio
+    async def test_money_list_fallback_dedupes_by_period(self):
+        """分年合并结果按 period 去重，保留先出现的条目。"""
+        fail = {"status": 2, "message": ""}
+        dup_2025 = {
+            "status": 1,
+            "data": [{"recordMonth": "202506", "curQty": "10", "receivable": "30"}],
+        }
+        dup_2026 = {
+            "status": 1,
+            "data": [{"recordMonth": "202506", "curQty": "99", "receivable": "99"}],
+        }
+        session = _FakeSession([fail, dup_2025, dup_2026])
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "202501", "202612")
+
+        assert len(bills) == 1
+        assert bills[0].period == "202506"
+        assert bills[0].usage_volume == 10.0  # 保留先出现的（2025 年）
+
+    @pytest.mark.asyncio
+    async def test_money_list_fallback_single_year_failure_continues(self):
+        """分年降级时单年失败不阻断其余年份。"""
+        fail = {"status": 2, "message": ""}
+        ok_2026 = {
+            "status": 1,
+            "data": [{"recordMonth": "202603", "curQty": "8", "receivable": "24"}],
+        }
+        session = _FakeSession([fail, fail, ok_2026])
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "202501", "202612")
+
+        assert len(session.calls) == 3  # 整段 + 2025(失败) + 2026(成功)
+        assert len(bills) == 1
+        assert bills[0].period == "202603"
+
+    @pytest.mark.asyncio
+    async def test_money_list_auth_error_not_retried(self):
+        """认证类错误（status=255）直接上抛，不做分年重试。"""
+        session = _FakeSession({"status": "255", "message": "认证失败,请重新登录"})
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        with pytest.raises(ZrGasAuthError):
+            await api.get_customer_money_list("C1", "202501", "202612")
+        assert len(session.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_money_list_fallback_invalid_range_uses_end_year(self):
+        """范围无法解析（非 YYYYMM）时退化为只查 end_time 所在年份一次。"""
+        fail = {"status": 2, "message": ""}
+        ok = {
+            "status": 1,
+            "data": [{"recordMonth": "202607", "curQty": "5", "receivable": "15"}],
+        }
+        session = _FakeSession([fail, ok])
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "bad_input", "202606")
+
+        assert len(session.calls) == 2  # 整段（失败） + end 年 2026 一次
+        assert session.calls[1][1]["data"]["startTime"] == "202601"
+        assert session.calls[1][1]["data"]["endTime"] == "202612"
+        assert len(bills) == 1
+        assert bills[0].period == "202607"
+
+    @pytest.mark.asyncio
+    async def test_money_list_fallback_fully_invalid_range_defaults_2026(self):
+        """end_time 也非法时兜底到 2026 年单年查询，不抛异常。"""
+        fail = {"status": 2, "message": ""}
+        empty = {"status": 1, "data": []}
+        session = _FakeSession([fail, empty])
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+        bills = await api.get_customer_money_list("C1", "??", "??")
+
+        assert len(session.calls) == 2
+        assert session.calls[1][1]["data"]["startTime"] == "202601"
+        assert session.calls[1][1]["data"]["endTime"] == "202612"
+        assert bills == []
 
     @pytest.mark.asyncio
     async def test_payment_log_real_field_names(self):
