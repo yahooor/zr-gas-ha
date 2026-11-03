@@ -1,0 +1,10 @@
+# 开发/测试依赖（2026-11-03 补）
+#
+# 此前本仓库没有依赖声明，干净环境 clone 后直接跑 pytest 会失败。
+# 这些包与 .github/workflows/ci.yml 中手动 `pip install` 的清单一致——改动时请两处同步。
+#
+# 安装：pip install -r requirements-dev.txt
+pytest>=8
+pytest-asyncio>=0.24
+aiohttp>=3.9
+ruff>=0.7
