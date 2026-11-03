@@ -33,6 +33,15 @@ Home Assistant 自定义集成，从**中燃在线**平台（`zrds.95007.com`）
 
 > 从 v1.x（旧 zr-gas-ha）升级：配置条目自动迁移，实体 ID 不变；从旧 zr-gas 仓库安装的用户请先卸载旧版（同域名会冲突）。
 
+## 本地开发
+
+```bash
+pip install -r requirements-dev.txt   # 测试与 lint 依赖
+pytest -q && ruff check .
+```
+
+AI 会话请先读 [AGENTS.md](AGENTS.md)——里面有发版流程、架构要点与红线。
+
 ## 配置
 
 ### 在线端 · 短信登录（推荐，免抓包）
