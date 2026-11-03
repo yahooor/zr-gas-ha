@@ -86,6 +86,15 @@ class ZrGasSmsError(ZrGasApiError):
     """Error during SMS verification code flow."""
 
 
+class ZrGasBillsUnavailable(ZrGasApiError):
+    """账单接口不可用（典型原因：账号绑定失效）。
+
+    v2.2.3 起与"真的没有账单"区分开：调用方收到本异常时，账单派生字段
+    （月用量/月费用/上期用量/年度统计/阶梯额度/推算单价）应降级为
+    unavailable，而不是沿用默认值 0.0 —— 否则「查不到」会被误读为「没花钱」。
+    """
+
+
 def _to_float(val: Any, default: float = 0.0) -> float:
     """Best-effort float conversion for API values."""
     try:
@@ -676,14 +685,15 @@ class ZrGasMpApi(ZrGasBaseApi):
             # 认证类错误直接上抛，不做分年重试
             raise
         except ZrGasApiError as err:
-            # 绑定失效类错误重试无意义，短路返回空列表并给出明确指引
+            # 绑定失效类错误重试无意义：上抛专用异常，让上层把账单派生值降级为
+            # unavailable（v2.2.3 前是静默 return []，导致金额类传感器显示 0.0）
             if _is_binding_error(err):
                 _LOGGER.warning(
                     "燃气用户绑定已失效（服务端: %s），"
-                    "请到「中燃在线」小程序重新绑定燃气户；跳过账单查询",
+                    "请到「中燃在线」小程序重新绑定燃气户；账单数据降级为不可用",
                     err,
                 )
-                return []
+                raise ZrGasBillsUnavailable(str(err)) from err
             _LOGGER.warning(
                 "getCustomerMoneyList full-range query failed (%s), "
                 "falling back to per-year slices",
@@ -738,6 +748,9 @@ class ZrGasMpApi(ZrGasBaseApi):
             start_year = end_year = int(end_time[:4]) if end_time[:4].isdigit() else 2026
 
         bills: list[ZrGasBill] = []
+        # 记录绑定失效错误：若最终一条账单都没拿到，说明是"查不到"而非"没有"，
+        # 需上抛 ZrGasBillsUnavailable 让上层降级（v2.2.3）
+        binding_err: ZrGasApiError | None = None
         seen_periods: set[str] = set()
         for year in range(start_year, end_year + 1):
             year_start = f"{year}01"
@@ -754,6 +767,7 @@ class ZrGasMpApi(ZrGasBaseApi):
                         "请到「中燃在线」小程序重新绑定燃气户；跳过后续年份账单查询",
                         err,
                     )
+                    binding_err = err
                     break
                 # 单年失败不阻断其余年份（保持与账单 best-effort 语义一致）
                 _LOGGER.warning("getCustomerMoneyList per-year query failed (%s): %s", year, err)
@@ -768,6 +782,10 @@ class ZrGasMpApi(ZrGasBaseApi):
                     continue
                 seen_periods.add(bill.period)
                 bills.append(bill)
+
+        # 命中绑定失效且一条账单都没拿到 → 判定为"不可用"，而非"没有账单"
+        if binding_err is not None and not bills:
+            raise ZrGasBillsUnavailable(str(binding_err)) from binding_err
 
         return bills
 

@@ -8,6 +8,7 @@ from zr_gas.api import (
     ZrGasApiError,
     ZrGasAuthError,
     ZrGasBaseApi,
+    ZrGasBillsUnavailable,
     ZrGasMpApi,
     ZrGasPayApi,
     _parse_bill_items,
@@ -648,15 +649,35 @@ class TestRealPayloadMappings:
         assert bills == []
 
     @pytest.mark.asyncio
-    async def test_money_list_binding_error_returns_empty_without_fallback(self):
-        """v2.2.2: 整段查询命中绑定失效错误 → 直接返回空列表，不做分年重试。"""
+    async def test_money_list_binding_error_raises_bills_unavailable(self):
+        """v2.2.3: 整段查询命中绑定失效 → 上抛 ZrGasBillsUnavailable，不做分年重试。
+
+        与 v2.2.2 的差异：旧行为是静默返回 []，导致上层把"查不到"当成"没有账单"，
+        金额类传感器显示 0.0。现在改为显式异常，让上层降级为 unavailable。
+        """
         session = _FakeSession({"status": 2, "msg": "请先完成燃气用户绑定，再办理燃气业务。"})
         api = ZrGasMpApi(session, access_token="t", user_id="u")
-        bills = await api.get_customer_money_list("C1", "202201", "202612")
 
-        assert bills == []
+        with pytest.raises(ZrGasBillsUnavailable):
+            await api.get_customer_money_list("C1", "202201", "202612")
+
         # 仅 1 次整段请求，无分年降级（否则 2022-2026 共 5 次）
         assert len(session.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_money_list_by_year_all_binding_fail_raises(self):
+        """v2.2.3: 分年查询每年都命中绑定失效、一条账单都没拿到 → 上抛降级异常。
+
+        区分「真的没有账单」（返回 []）与「查不到」（抛异常）。
+        """
+        binding_fail = {"status": 2, "msg": "请先完成燃气用户绑定，再办理燃气业务。"}
+        session = _FakeSession(
+            [binding_fail, binding_fail, binding_fail, binding_fail, binding_fail]
+        )
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+
+        with pytest.raises(ZrGasBillsUnavailable):
+            await api._query_money_list_by_year("C1", "202201", "202612")
 
     @pytest.mark.asyncio
     async def test_money_list_by_year_binding_error_breaks_loop(self):

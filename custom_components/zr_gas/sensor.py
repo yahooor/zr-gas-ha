@@ -36,7 +36,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import ZrGasDataUpdateCoordinator
 from .const import DOMAIN, SOURCE_PAY
-from .models import ZrGasDeviceData
+from .models import ZrGasDeviceData, is_bill_derived_unavailable
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -428,10 +428,17 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
 
     @property
     def native_value(self) -> float | str | None:
-        """Return the sensor value extracted by value_fn."""
+        """Return the sensor value extracted by value_fn.
+
+        v2.2.3：账单接口降级时，账单派生字段返回 None（HA 显示 unavailable），
+        而不是沿用默认值 0.0 —— 否则「查不到」会被误读为「这个月没花钱」。
+        """
         if self.coordinator.data is None:
             return None
-        return self.entity_description.value_fn(self.coordinator.data)
+        data = self.coordinator.data
+        if is_bill_derived_unavailable(data, self.entity_description.key):
+            return None
+        return self.entity_description.value_fn(data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

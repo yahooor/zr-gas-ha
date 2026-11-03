@@ -34,7 +34,14 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .api import ZrGasApiError, ZrGasAuthError, ZrGasBaseApi, ZrGasMpApi, ZrGasPayApi
+from .api import (
+    ZrGasApiError,
+    ZrGasAuthError,
+    ZrGasBaseApi,
+    ZrGasBillsUnavailable,
+    ZrGasMpApi,
+    ZrGasPayApi,
+)
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_BALANCE_THRESHOLD,
@@ -451,9 +458,22 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 raise ConfigEntryAuthFailed(
                     f"Authentication failed for {self.cust_name}: {bills}"
                 ) from bills
-            if isinstance(bills, Exception):
+            bills_degraded = False
+            if isinstance(bills, ZrGasBillsUnavailable):
+                # 账单接口不可用（典型：账号绑定失效）。与"真的没有账单"区分：
+                # 账单派生字段一律降级为 unavailable，避免 0.0 被误读为"没花钱"（v2.2.3）
+                _LOGGER.warning(
+                    "Bills unavailable for %s (%s); bill-derived sensors will report "
+                    "unavailable instead of 0",
+                    self.cust_name,
+                    bills,
+                )
+                bills_degraded = True
+                bills = []
+            elif isinstance(bills, Exception):
                 _LOGGER.warning("Failed to fetch bills for %s: %s", self.cust_name, bills)
                 bills = []
+                bills_degraded = True
             if isinstance(meter, Exception):
                 # Meter enrichment is best-effort (缴费端 only)
                 _LOGGER.debug("Meter info unavailable for %s: %s", self.cust_name, meter)
@@ -555,6 +575,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 price_source=price_source,
                 monthly_stats=monthly_stats,
                 yearly_stats=yearly_stats,
+                bills_degraded=bills_degraded,
             )
 
         except ConfigEntryAuthFailed:

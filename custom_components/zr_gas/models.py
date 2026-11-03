@@ -250,3 +250,38 @@ class ZrGasDeviceData:
     # 统计
     monthly_stats: list[MonthlyStat] = field(default_factory=list)
     yearly_stats: list[YearlyStat] = field(default_factory=list)
+    # 账单接口是否降级（v2.2.3）
+    # True 表示账单查询失败（如账号绑定失效），账单派生字段不可信，
+    # 传感器应报 unavailable 而不是 0.0 —— 否则「查不到」会被误读为「这个月没花钱」。
+    bills_degraded: bool = False
+
+
+# ── 账单降级判定（v2.2.3）─────────────────────────────────────────────
+# 这些字段完全由账单（getCustomerMoneyList）派生：账单查询失败时它们的
+# 默认值 0.0 是"没有数据"而不是"真的是 0"，必须报 unavailable。
+BILL_DERIVED_KEYS: frozenset[str] = frozenset(
+    {
+        "monthly_usage",
+        "monthly_cost",
+        "last_month_usage",
+        "last_month_cost",
+        "annual_cost",
+        "annual_usage",
+        "tier_remaining",
+    }
+)
+
+
+def is_bill_derived_unavailable(data: ZrGasDeviceData, key: str) -> bool:
+    """账单降级时，该传感器是否应报 unavailable（而非 0.0）。
+
+    gas_price 单独处理：它有 api 与 derived 两个来源，只有 derived
+    （由账单单价推算）才受账单降级影响；api 直供的单价仍然可信。
+    """
+    if not getattr(data, "bills_degraded", False):
+        return False
+    if key in BILL_DERIVED_KEYS:
+        return True
+    if key == "gas_price":
+        return data.price_source != "api"
+    return False

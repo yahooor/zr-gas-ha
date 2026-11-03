@@ -1,7 +1,12 @@
 """Tests for zr_gas.models — TierConfig and dataclasses."""
 
 import pytest
-from zr_gas.models import MonthlyStat, YearlyStat, ZrGasBill
+from zr_gas.models import (
+    MonthlyStat,
+    YearlyStat,
+    ZrGasBill,
+    is_bill_derived_unavailable,
+)
 
 # ── TierConfig.get_tier_info ──────────────────────────────────────────
 
@@ -184,3 +189,66 @@ class TestDataclasses:
     def test_yearly_stat(self):
         ys = YearlyStat(year="2026", gas_num=186.0, gas_cost=556.14)
         assert ys.year == "2026"
+
+
+# ── 账单降级判定（v2.2.3）────────────────────────────────────────────
+
+
+def _mk_data(**kwargs):
+    """构造最小可用的 ZrGasDeviceData，只关心降级相关字段。"""
+    from zr_gas.models import ZrGasDeviceData
+
+    base = dict(
+        source="mp",
+        balance=1199.0,
+        cust_code="C1",
+        cust_name="测试用户",
+        cust_address="地址",
+        monthly_usage=0.0,
+        monthly_cost=0.0,
+        period="202611",
+        unit_price=0.0,
+    )
+    base.update(kwargs)
+    return ZrGasDeviceData(**base)
+
+
+class TestBillDerivedUnavailable:
+    """账单降级时，哪些传感器应报 unavailable（而非 0.0）。"""
+
+    def test_not_degraded_returns_false(self):
+        data = _mk_data(bills_degraded=False)
+        assert is_bill_derived_unavailable(data, "monthly_usage") is False
+        assert is_bill_derived_unavailable(data, "gas_price") is False
+
+    def test_degraded_bill_derived_keys_unavailable(self):
+        data = _mk_data(bills_degraded=True)
+        for key in (
+            "monthly_usage",
+            "monthly_cost",
+            "last_month_usage",
+            "last_month_cost",
+            "annual_cost",
+            "annual_usage",
+            "tier_remaining",
+        ):
+            assert is_bill_derived_unavailable(data, key) is True, key
+
+    def test_degraded_non_bill_keys_still_available(self):
+        """余额/表读数/购气次数来自详情接口，不受账单降级影响。"""
+        data = _mk_data(bills_degraded=True)
+        for key in ("balance", "last_record", "qty_meter_balance", "purch_times", "owe_money"):
+            assert is_bill_derived_unavailable(data, key) is False, key
+
+    def test_degraded_gas_price_api_source_stays_available(self):
+        """单价若由 api 直供，账单降级不影响它。"""
+        data = _mk_data(bills_degraded=True, price_source="api")
+        assert is_bill_derived_unavailable(data, "gas_price") is False
+
+    def test_degraded_gas_price_derived_becomes_unavailable(self):
+        data = _mk_data(bills_degraded=True, price_source="derived")
+        assert is_bill_derived_unavailable(data, "gas_price") is True
+
+    def test_degraded_gas_price_no_source_becomes_unavailable(self):
+        data = _mk_data(bills_degraded=True, price_source="")
+        assert is_bill_derived_unavailable(data, "gas_price") is True
