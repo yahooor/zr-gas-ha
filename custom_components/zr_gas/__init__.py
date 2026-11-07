@@ -41,6 +41,7 @@ from .api import (
     ZrGasBillsUnavailable,
     ZrGasMpApi,
     ZrGasPayApi,
+    miniapp_label,
 )
 from .const import (
     CONF_ACCESS_TOKEN,
@@ -411,6 +412,8 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
         self.tier_config = tier_config
         self.bill_years = bill_years
         self.balance_threshold = balance_threshold
+        # v2.2.4: 账单降级告警降频（同一 coordinator 只 WARNING 一次）
+        self._bills_degraded_warned = False
 
     async def _async_update_data(self) -> ZrGasDeviceData:
         """Fetch data from the ZR Gas API (source-agnostic).
@@ -462,25 +465,53 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             if isinstance(bills, ZrGasBillsUnavailable):
                 # 账单接口不可用（典型：账号绑定失效）。与"真的没有账单"区分：
                 # 账单派生字段一律降级为 unavailable，避免 0.0 被误读为"没花钱"（v2.2.3）
-                _LOGGER.warning(
-                    "Bills unavailable for %s (%s); bill-derived sensors will report "
-                    "unavailable instead of 0",
-                    self.cust_name,
-                    bills,
-                )
+                #
+                # v2.2.4: 绑定失效是持久状态、不会自愈，重复 WARNING 只会淹没日志。
+                # 首次给出完整指引（含具体小程序渠道），之后降为 DEBUG。
+                # 日志同时指明渠道来源，避免用户不知道该去微信还是支付宝小程序。
+                if self._bills_degraded_warned:
+                    _LOGGER.debug(
+                        "账单数据仍处于降级状态（%s），请到%s重新绑定燃气户",
+                        bills,
+                        miniapp_label(self.source),
+                    )
+                else:
+                    self._bills_degraded_warned = True
+                    _LOGGER.warning(
+                        "Bills unavailable for %s (%s); bill-derived sensors will report "
+                        "unavailable instead of 0 — 请到%s重新绑定燃气户",
+                        self.cust_name,
+                        bills,
+                        miniapp_label(self.source),
+                    )
                 bills_degraded = True
                 bills = []
             elif isinstance(bills, Exception):
-                _LOGGER.warning("Failed to fetch bills for %s: %s", self.cust_name, bills)
+                _LOGGER.warning(
+                    "Failed to fetch bills for %s from %s: %s",
+                    self.cust_name,
+                    miniapp_label(self.source),
+                    bills,
+                )
                 bills = []
                 bills_degraded = True
             if isinstance(meter, Exception):
                 # Meter enrichment is best-effort (缴费端 only)
-                _LOGGER.debug("Meter info unavailable for %s: %s", self.cust_name, meter)
+                _LOGGER.debug(
+                    "Meter info unavailable for %s (%s): %s",
+                    self.cust_name,
+                    miniapp_label(self.source),
+                    meter,
+                )
                 meter = None
             if isinstance(payments, Exception):
                 # Payment log is best-effort (借鉴 hazr 端点，失败静默降级)
-                _LOGGER.debug("Payment log unavailable for %s: %s", self.cust_name, payments)
+                _LOGGER.debug(
+                    "Payment log unavailable for %s (%s): %s",
+                    self.cust_name,
+                    miniapp_label(self.source),
+                    payments,
+                )
                 payments = []
             payment_list = payments if isinstance(payments, list) else []
             last_payment = payment_list[0] if payment_list else None

@@ -23,6 +23,31 @@ SOURCES = {
     SOURCE_PAY: "缴费端",
 }
 
+# ── 小程序渠道标识 ────────────────────────────────────────────────────
+# 两个数据来源都是**微信小程序**（抓包实测 platform=mp-weixin、
+# Referer servicewechat.com/<appid>），只是小程序不同。
+#
+# 实测记录（2026-05 抓包 Stream-*.har，zrds.95007.com 全部请求）：
+#   - 缴费端 appid wx2082cbdc25b3b8e6（146+ 次请求）
+#   - 全部 platform=mp-weixin，无 mp-alipay / servicewechat 之外的渠道
+# - 缴费流水里的 aliPayAmount / weChatAmount 是**支付方式字段名**，
+#   不是"支付宝小程序"渠道，别混淆。
+#
+# 支付宝小程序（mp-alipay）目前没有任何证据支持，故不作为独立来源。
+# 若将来接入，用 SOURCE_ALIPAY 之类的常量另立一条 source。
+MP_APPID_MP = "wx19c4e29f3ef6b4a0"  # 在线端小程序 appid
+MP_APPID_PAY = "wx2082cbdc25b3b8e6"  # 缴费端小程序 appid
+
+# 数据来源 → 小程序渠道描述。用于日志/提示文案，让用户知道该去哪个
+# 小程序里重新绑定，而不是笼统的"中燃在线小程序"。
+SOURCE_MINIAPP = {
+    SOURCE_MP: f"微信小程序「中燃在线·在线端」(appid {MP_APPID_MP})",
+    SOURCE_PAY: f"微信小程序「中燃在线·缴费端」(appid {MP_APPID_PAY})",
+}
+
+# 兜底文案：来源未知时用这个，不编造渠道。
+SOURCE_MINIAPP_UNKNOWN = "中燃在线小程序"
+
 # Config entry keys
 CONF_SOURCE = "source"
 CONF_ACCESS_TOKEN = "access_token"

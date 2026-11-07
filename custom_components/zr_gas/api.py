@@ -48,6 +48,8 @@ from .const import (
     ENDPOINT_SEND_SMS,
     PAY_EXTRA_HEADERS,
     SIGN_SALT,
+    SOURCE_MINIAPP,
+    SOURCE_MINIAPP_UNKNOWN,
     SOURCE_MP,
     SOURCE_PAY,
     X_MAS_SID_PREFIX,
@@ -74,6 +76,16 @@ def _is_binding_error(err: Exception) -> bool:
     return "燃气用户绑定" in text or "绑定" in text
 
 
+def miniapp_label(source: str) -> str:
+    """返回该数据来源对应的小程序渠道描述。
+
+    报错文案里必须写清是哪个小程序（微信 / 支付宝 / 其它），否则用户
+    不知道该去哪儿重新绑定燃气户。当前两个来源都是**微信小程序**
+    （抓包实测 platform=mp-weixin），只是小程序不同。
+    """
+    return SOURCE_MINIAPP.get(source, SOURCE_MINIAPP_UNKNOWN)
+
+
 class ZrGasApiError(Exception):
     """Base exception for ZR Gas API errors."""
 
@@ -92,7 +104,19 @@ class ZrGasBillsUnavailable(ZrGasApiError):
     v2.2.3 起与"真的没有账单"区分开：调用方收到本异常时，账单派生字段
     （月用量/月费用/上期用量/年度统计/阶梯额度/推算单价）应降级为
     unavailable，而不是沿用默认值 0.0 —— 否则「查不到」会被误读为「没花钱」。
+
+    v2.2.4 起携带 ``source``，让上层日志能指明是哪个小程序渠道出的问题。
     """
+
+    def __init__(self, message: str, source: str = "") -> None:
+        """Initialize with the data source that produced the error."""
+        super().__init__(message)
+        self.source = source
+
+    @property
+    def miniapp(self) -> str:
+        """Return the mini-program channel description for this source."""
+        return miniapp_label(self.source)
 
 
 def _to_float(val: Any, default: float = 0.0) -> float:
@@ -146,6 +170,32 @@ class ZrGasBaseApi:
         # should use ``set_login_session()`` to inject a session created
         # via ``async_create_clientsession(hass, cookie_jar=aiohttp.CookieJar(unsafe=True))``.
         self._login_session: aiohttp.ClientSession | None = None
+        # v2.2.4: 绑定失效告警降频。同一客户端实例内只 WARNING 一次，
+        # 之后降为 DEBUG —— 避免每 6 小时轮询都刷一条 WARNING。
+        self._binding_warned = False
+
+    def _log_binding_lost(self, err: Exception, *, detail: str = "") -> None:
+        """记录"燃气用户绑定失效"，同一客户端只告警一次。
+
+        绑定失效是**需要用户操作**的持久状态（要去小程序重新绑定），
+        不会因重试而改变，因此没必要每轮轮询都刷 WARNING。
+        首次 WARNING 给出完整指引（含具体小程序渠道），后续降为 DEBUG。
+        """
+        if self._binding_warned:
+            _LOGGER.debug(
+                "燃气用户绑定仍处于失效状态（%s），请到%s重新绑定燃气户；本次不再重复告警",
+                err,
+                miniapp_label(self.source),
+            )
+            return
+
+        self._binding_warned = True
+        _LOGGER.warning(
+            "燃气用户绑定已失效（服务端: %s），请到%s重新绑定燃气户；账单数据降级为不可用%s",
+            err,
+            miniapp_label(self.source),
+            detail,
+        )
 
     # ── Credentials ────────────────────────────────────────────────
 
@@ -688,12 +738,8 @@ class ZrGasMpApi(ZrGasBaseApi):
             # 绑定失效类错误重试无意义：上抛专用异常，让上层把账单派生值降级为
             # unavailable（v2.2.3 前是静默 return []，导致金额类传感器显示 0.0）
             if _is_binding_error(err):
-                _LOGGER.warning(
-                    "燃气用户绑定已失效（服务端: %s），"
-                    "请到「中燃在线」小程序重新绑定燃气户；账单数据降级为不可用",
-                    err,
-                )
-                raise ZrGasBillsUnavailable(str(err)) from err
+                self._log_binding_lost(err)
+                raise ZrGasBillsUnavailable(str(err), self.source) from err
             _LOGGER.warning(
                 "getCustomerMoneyList full-range query failed (%s), "
                 "falling back to per-year slices",
@@ -762,11 +808,7 @@ class ZrGasMpApi(ZrGasBaseApi):
             except ZrGasApiError as err:
                 # 绑定失效类错误重试无意义，跳过剩余年份（已合并的账单正常返回）
                 if _is_binding_error(err):
-                    _LOGGER.warning(
-                        "燃气用户绑定已失效（服务端: %s），"
-                        "请到「中燃在线」小程序重新绑定燃气户；跳过后续年份账单查询",
-                        err,
-                    )
+                    self._log_binding_lost(err, detail="；跳过后续年份账单查询")
                     binding_err = err
                     break
                 # 单年失败不阻断其余年份（保持与账单 best-effort 语义一致）
@@ -785,7 +827,7 @@ class ZrGasMpApi(ZrGasBaseApi):
 
         # 命中绑定失效且一条账单都没拿到 → 判定为"不可用"，而非"没有账单"
         if binding_err is not None and not bills:
-            raise ZrGasBillsUnavailable(str(binding_err)) from binding_err
+            raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
 
         return bills
 
@@ -907,6 +949,9 @@ class ZrGasPayApi(ZrGasBaseApi):
 
         The pay source has no period-range endpoint; the YYYYMM range is
         converted to a year span and each year queried separately.
+
+        v2.2.4: 与在线端对齐 —— 绑定失效类错误短路并抛 ZrGasBillsUnavailable，
+        让上层把账单派生值降级为 unavailable，并在日志里指明是缴费端小程序。
         """
         try:
             start_year = int(start_time[:4])
@@ -915,6 +960,7 @@ class ZrGasPayApi(ZrGasBaseApi):
             start_year = end_year = int(end_time[:4]) if end_time[:4].isdigit() else 2026
 
         bills: list[ZrGasBill] = []
+        binding_err: ZrGasApiError | None = None
         for year in range(start_year, end_year + 1):
             url = f"{BASE_URL}{ENDPOINT_PAY_BILL_HISTORY}"
             timestamp = self._get_timestamp()
@@ -927,9 +973,26 @@ class ZrGasPayApi(ZrGasBaseApi):
                 "signature": signature,
             }
 
-            result = await self._post(url, data)
+            try:
+                result = await self._post(url, data)
+            except ZrGasAuthError:
+                raise
+            except ZrGasApiError as err:
+                # 绑定失效：重试无意义，跳过剩余年份
+                if _is_binding_error(err):
+                    self._log_binding_lost(err, detail="；跳过后续年份账单查询")
+                    binding_err = err
+                    break
+                # 单年失败不阻断其余年份
+                _LOGGER.warning("queryBillHistory failed (%s): %s", year, err)
+                continue
+
             _LOGGER.debug("queryBillHistory raw items (%s): %s", year, result.get("data"))
             bills.extend(_parse_bill_items(result.get("data")))
+
+        # 命中绑定失效且一条账单都没拿到 → 判定为"不可用"，而非"没有账单"
+        if binding_err is not None and not bills:
+            raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
 
         return bills
 

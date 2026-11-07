@@ -12,8 +12,16 @@ from zr_gas.api import (
     ZrGasMpApi,
     ZrGasPayApi,
     _parse_bill_items,
+    miniapp_label,
 )
-from zr_gas.const import SIGN_SALT, SOURCE_MP, SOURCE_PAY
+from zr_gas.const import (
+    MP_APPID_MP,
+    MP_APPID_PAY,
+    SIGN_SALT,
+    SOURCE_MINIAPP_UNKNOWN,
+    SOURCE_MP,
+    SOURCE_PAY,
+)
 
 # ── Test doubles ──────────────────────────────────────────────────────
 
@@ -754,3 +762,135 @@ class TestRealPayloadMappings:
         assert detail.cust_type == "01"
         assert detail.gas_price == 0.0  # price=null → 0（未知）
         assert detail.award_money == 0.0  # 真实 0
+
+
+# ── v2.2.4 小程序渠道标注 + 绑定失效告警降频 ─────────────────────────
+
+
+class TestMiniappLabel:
+    """报错文案必须写清是哪个小程序渠道（微信 / 支付宝 / 其它）。"""
+
+    def test_mp_source_is_wechat_miniapp(self):
+        """在线端 → 微信小程序「中燃在线·在线端」。"""
+        label = miniapp_label(SOURCE_MP)
+        assert "微信小程序" in label
+        assert MP_APPID_MP in label
+
+    def test_pay_source_is_wechat_miniapp(self):
+        """缴费端 → 微信小程序「中燃在线·缴费端」。"""
+        label = miniapp_label(SOURCE_PAY)
+        assert "微信小程序" in label
+        assert MP_APPID_PAY in label
+
+    def test_two_sources_are_different_miniapps(self):
+        """两个来源都是微信小程序，但 appid 不同，文案必须能区分。"""
+        assert miniapp_label(SOURCE_MP) != miniapp_label(SOURCE_PAY)
+
+    def test_unknown_source_falls_back_without_inventing_channel(self):
+        """未知来源用兜底文案，不编造渠道。"""
+        label = miniapp_label("unknown")
+        assert label == SOURCE_MINIAPP_UNKNOWN
+        assert "支付宝" not in label
+
+    def test_no_source_is_alipay(self):
+        """当前无任何支付宝小程序来源，别把渠道标错。"""
+        assert "支付宝" not in miniapp_label(SOURCE_MP)
+        assert "支付宝" not in miniapp_label(SOURCE_PAY)
+
+
+class TestBillsUnavailableCarriesSource:
+    """降级异常要带上来源，上层才能拼出渠道文案。"""
+
+    @pytest.mark.asyncio
+    async def test_mp_raises_with_source(self):
+        """在线端绑定失效 → 异常带 source=mp。"""
+        session = _FakeSession({"status": 2, "msg": "请先完成燃气用户绑定，再办理燃气业务。"})
+        api = ZrGasMpApi(session, access_token="t", user_id="u")
+
+        with pytest.raises(ZrGasBillsUnavailable) as excinfo:
+            await api.get_customer_money_list("C1", "202201", "202612")
+
+        assert excinfo.value.source == SOURCE_MP
+        assert "微信小程序" in excinfo.value.miniapp
+
+    @pytest.mark.asyncio
+    async def test_pay_raises_with_source(self):
+        """缴费端绑定失效 → 异常带 source=pay。"""
+        session = _FakeSession({"status": 2, "msg": "请先完成燃气用户绑定，再办理燃气业务。"})
+        api = ZrGasPayApi(session, access_token="t", user_id="u")
+
+        with pytest.raises(ZrGasBillsUnavailable) as excinfo:
+            await api.get_customer_money_list("C1", "202201", "202612")
+
+        assert excinfo.value.source == SOURCE_PAY
+        assert "微信小程序" in excinfo.value.miniapp
+        assert MP_APPID_PAY in excinfo.value.miniapp
+
+
+class TestBindingLostLogThrottling:
+    """绑定失效是持久状态，同一客户端只 WARNING 一次，之后降为 DEBUG。"""
+
+    def _binding_err(self):
+        return ZrGasApiError(
+            'API error (status=2): 请先完成燃气用户绑定，再办理燃气业务。 | raw={"status": "2"}'
+        )
+
+    def test_first_call_warns_with_channel(self, caplog):
+        """首次告警带小程序渠道。"""
+        api = ZrGasMpApi(_FakeSession({"status": 1}), access_token="t", user_id="u")
+
+        with caplog.at_level("WARNING"):
+            api._log_binding_lost(self._binding_err())
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "微信小程序" in warnings[0].getMessage()
+        assert MP_APPID_MP in warnings[0].getMessage()
+
+    def test_second_call_does_not_warn(self, caplog):
+        """第二次起不再 WARNING。"""
+        api = ZrGasMpApi(_FakeSession({"status": 1}), access_token="t", user_id="u")
+
+        with caplog.at_level("WARNING"):
+            api._log_binding_lost(self._binding_err())
+            api._log_binding_lost(self._binding_err())
+            api._log_binding_lost(self._binding_err())
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+
+    def test_throttled_call_still_logs_at_debug(self, caplog):
+        """被降频的调用降为 DEBUG，信息不丢失。"""
+        api = ZrGasMpApi(_FakeSession({"status": 1}), access_token="t", user_id="u")
+
+        with caplog.at_level("DEBUG"):
+            api._log_binding_lost(self._binding_err())
+            api._log_binding_lost(self._binding_err())
+
+        debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+        assert debugs, "降频后应保留 DEBUG 日志"
+        assert "微信小程序" in debugs[-1].getMessage()
+
+    def test_pay_source_warning_names_pay_miniapp(self, caplog):
+        """缴费端告警指明缴费端小程序。"""
+        api = ZrGasPayApi(_FakeSession({"status": 1}), access_token="t", user_id="u")
+
+        with caplog.at_level("WARNING"):
+            api._log_binding_lost(self._binding_err())
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert MP_APPID_PAY in warnings[0].getMessage()
+
+    def test_each_instance_warns_once_independently(self, caplog):
+        """不同客户端实例各自独立告警一次（重启后仍能看到提醒）。"""
+        api1 = ZrGasMpApi(_FakeSession({"status": 1}), access_token="t", user_id="u")
+        api2 = ZrGasMpApi(_FakeSession({"status": 1}), access_token="t", user_id="u")
+
+        with caplog.at_level("WARNING"):
+            api1._log_binding_lost(self._binding_err())
+            api1._log_binding_lost(self._binding_err())
+            api2._log_binding_lost(self._binding_err())
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 2
