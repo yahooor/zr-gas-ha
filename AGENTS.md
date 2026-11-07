@@ -23,15 +23,47 @@ ruff format --check .                 # 必须全绿
 git commit -am "..." && git push
 git tag v2.2.N && git push origin v2.2.N
 gh release create v2.2.N --title "..." --notes "..."
+#    CI 会自动建 release 与 zr_gas.zip 资产；gh release create 报
+#    "Release.tag_name already exists" 说明 CI 抢先了，用 gh release edit 补文案
 
 # 2 镜像仓 yahooor/zr-gas 必须同版本同步
 #    同步内容：custom_components/zr_gas/*.py、manifest.json、tests/、README、hacs.json
 #    注意镜像仓行尾混合（api.py=CRLF，其余=LF），已设 core.autocrlf=false
 #    提交信息沿用 "feat: v2.2.N — 与主仓库同步"
 
-# 3 HACS 更新
-haops hacs update yahooor/zr-gas-ha --version v2.2.N
+# 3 HA 侧安装 + **必须重启**（见下方「安装后必须重启 HA」）
 ```
+
+## 安装后必须重启 HA（2026-11-07 实测，勿省）
+
+HA 2026.11 用的是**内置 marketplace 组件**（不再是 HACS 集成，`haops hacs update`
+已失效——`hacs/*` WS 命令全部 unknown_command）。
+
+```bash
+# marketplace profile 必须是 default（hasscn 的 api 端点 ghapi.hacs.vip 已挂）
+#   改法见 memory/2026-11-07.md（options flow 对 marketplace 返回 500，
+#   只能 SSH 改 /homeassistant/.storage/core.config_entries 后重启）
+
+haops ws marketplace/repository/install '{"repository":"<repo_id>","version":"v2.2.N"}'
+haops restart        # ← 这一步不能省，原因见下
+```
+
+**为什么必须重启**（受控实验验证过，v2.2.5/v2.2.6 实验版）：
+
+| 操作后 | 磁盘上的代码 | 运行中的代码 |
+|---|---|---|
+| marketplace install | 新 | **旧** |
+| reload config entry | 新 | **旧** |
+| **重启 HA** | 新 | **新** |
+
+根因：Python 的 `sys.modules` + HA loader 的 `Integration._cache` 双重缓存。
+marketplace 组件里 `async_reload` 一次都没调用 —— 它只
+`async_clear_custom_components_cache()`（清「自定义组件发现列表」，
+不清 `sys.modules`）并创建 `restart_required_*` issue 提示重启。
+**reload config entry 也无效**，因为已 import 的模块不会被重新 import。
+
+顺带：marketplace install 会**先删掉整个集成目录再写入**（实测 `custom_components/zr_gas`
+短暂消失约 30 秒）。这期间该集成的实体是 unavailable，属正常现象，别误判为安装失败。
 
 ## 架构要点
 
@@ -60,3 +92,4 @@ haops hacs update yahooor/zr-gas-ha --version v2.2.N
 - **不要只改主仓不改镜像**：`yahooor/zr-gas` 是只读镜像，不同步会让用户装到旧版
 - 不要用 `0.0` 表达「查不到」——这是本仓历史上最大的坑
 - 镜像仓已设 `core.autocrlf=false`，改动前确认行尾风格，否则产生整文件假 diff
+- **安装/更新后必须重启 HA**，reload config entry 不生效（见「安装后必须重启 HA」）
