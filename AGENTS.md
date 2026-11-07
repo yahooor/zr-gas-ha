@@ -40,12 +40,8 @@ HA 2026.11 用的是**内置 marketplace 组件**（不再是 HACS 集成，`hao
 已失效——`hacs/*` WS 命令全部 unknown_command）。
 
 ```bash
-# marketplace profile 必须是 default（hasscn 的 api 端点 ghapi.hacs.vip 已挂）
-#   改法见 memory/2026-11-07.md（options flow 对 marketplace 返回 500，
-#   只能 SSH 改 /homeassistant/.storage/core.config_entries 后重启）
-
-haops ws marketplace/repository/install '{"repository":"<repo_id>","version":"v2.2.N"}'
-haops restart        # ← 这一步不能省，原因见下
+# 一条命令搞定：查 id → 安装 → 重启 HA → 验证集成 loaded
+haops marketplace update yahooor/zr-gas-ha --version v2.2.N
 ```
 
 **为什么必须重启**（受控实验验证过，v2.2.5/v2.2.6 实验版）：
