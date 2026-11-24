@@ -17,7 +17,7 @@
  *   show_meter: true        # show meter info footer (default true)
  */
 
-const CARD_VERSION = '2.1.4';
+const CARD_VERSION = '2.1.5';
 
 class ZrGasCard extends HTMLElement {
   static get styles() {
@@ -232,6 +232,28 @@ class ZrGasCard extends HTMLElement {
     return `${val.toFixed(digits)}${unit ? `<span class="item-unit"> ${unit}</span>` : ''}`;
   }
 
+  _formatBeijingTimestamp(value) {
+    if (typeof value !== 'string') return '—';
+    // Require a complete, timezone-aware ISO timestamp; never assume the browser timezone.
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+    if (!match) return '—';
+    const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+    if (year < 1 || month < 1 || month > 12 || day < 1 ||
+        day > new Date(Date.UTC(year, month, 0)).getUTCDate() ||
+        hour > 23 || minute > 59 || second > 59) return '—';
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return '—';
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Shanghai',
+      calendar: 'gregory',
+      numberingSystem: 'latn',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+    }).formatToParts(date);
+    const fields = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return `${fields.year}-${fields.month}-${fields.day} ${fields.hour}:${fields.minute}:${fields.second}`;
+  }
+
   _renderSkeleton() {
     this.shadowRoot.innerHTML = `
       <style>${ZrGasCard.styles}</style>
@@ -349,9 +371,8 @@ class ZrGasCard extends HTMLElement {
       if (attrs.card_no) infoParts.push(`卡号: ${attrs.card_no}`);
       if (attrs.meter_loc) infoParts.push(`位置: ${attrs.meter_loc}`);
       const cutoff = this._sibling('meter_snapshot_time');
-      if (cutoff?.attributes?.data_source === 'queryLatestMeterInfo.dataTime' &&
-          cutoff.state !== 'unknown' && cutoff.state !== 'unavailable') {
-        infoParts.push(`截止时间: ${cutoff.state}`);
+      if (cutoff?.attributes?.data_source === 'queryLatestMeterInfo.dataTime') {
+        infoParts.push(`截止时间（北京时间）: ${this._formatBeijingTimestamp(cutoff.state)}`);
       }
       if (lastRecord && Number.isFinite(Number(lastRecord.state))) {
         infoParts.push(`读数: ${parseFloat(lastRecord.state).toFixed(0)} m³`);

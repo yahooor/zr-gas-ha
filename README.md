@@ -103,6 +103,10 @@ AI 会话请先读 [AGENTS.md](AGENTS.md)——里面有发版流程、架构要
 
 ## 前端卡片
 
+当前独立卡片版本为 **v2.1.5**，后端集成仍为 **v2.2.9**。卡片通过 `Intl.DateTimeFormat` 的 `Asia/Shanghai` 时区，将独立 `meter_snapshot_time` 的完整带时区 ISO 时间显示为 `截止时间（北京时间）: YYYY-MM-DD HH:mm:ss`，不依赖浏览器本地时区，也不手工固定加 8 小时。该实体状态未知或时间非法时显示 `—`，绝不退回旧抄表日期。
+
+此修复只需独立替换卡片 JS，并将资源参数更新为 `/local/zr_gas_card/zr-gas-card.js?v=2.1.5` 后刷新浏览器缓存；不更新集成文件、不改变后端版本，也无需为此重启 HA。
+
 ```yaml
 type: custom:zr-gas-card
 entity: sensor.zhong_ran_ran_qi_XXXX_balance
@@ -147,6 +151,12 @@ python scripts/verify_api.py --sms --mobile <手机号>
 - **零外部依赖**（aiohttp/hashlib 均为 HA 内置）；最低 HA 2024.1.0
 
 ## 更新日志
+
+### 前端卡片 v2.1.5 — 独立北京时间显示修复
+
+- 将 HA 返回的带时区 ISO 截止时间通过 `Intl` 转换为明确北京时间，保留秒并正确处理 UTC 跨日/跨年；例如 `2026-11-23T16:32:34+00:00` 显示为 `2026-11-24 00:32:34`。
+- 未知、缺少时区或非法时间显示 `—`，不从 CRM 最后抄表日期回退。只涉及卡片、其 Node 回归与本说明；集成 **v2.2.9** 和原核心标签保持不变。
+- 独立卡片文件及资源缓存参数需单独更新为 **v2.1.5**，不会随 Marketplace 集成归档自动更新。
 
 ### v2.2.9 — 表内气量与账期口径修复
 

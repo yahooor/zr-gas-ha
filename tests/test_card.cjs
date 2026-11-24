@@ -85,11 +85,52 @@ test('QA cutoff uses only the independent snapshot entity when legacy reading ti
       });
       assert.doesNotMatch(card.shadowRoot.innerHTML, /2040-01-01|NaN/);
       if (cutoff === 'unknown') {
-        assert.doesNotMatch(card.shadowRoot.innerHTML, /截止时间/);
+        assert.match(card.shadowRoot.innerHTML, /截止时间（北京时间）: —/);
       } else {
-        assert.match(card.shadowRoot.innerHTML, /截止时间: 2041-02-12T04:05:06/);
+        assert.match(card.shadowRoot.innerHTML, /截止时间（北京时间）: 2041-02-12 04:05:06/);
       }
     }
+  }
+});
+
+test('timezone-aware ISO cutoff is converted to explicit Beijing wall time across dates', () => {
+  const cases = [
+    ['2026-11-23T16:32:34+00:00', '2026-11-24 00:32:34'],
+    ['2026-11-23T16:32:34Z', '2026-11-24 00:32:34'],
+    ['2026-11-24T00:32:34+08:00', '2026-11-24 00:32:34'],
+    ['2026-12-31T16:00:00Z', '2027-01-01 00:00:00'],
+    ['2026-11-24T00:32:34+09:00', '2026-11-23 23:32:34'],
+    ['2026-11-23T16:32:34.123456Z', '2026-11-24 00:32:34'],
+  ];
+  for (const [iso, expected] of cases) {
+    const card = render({
+      'sensor.gas_balance': state(10),
+      'sensor.gas_meter_snapshot_time': state(iso, { data_source: 'queryLatestMeterInfo.dataTime' }),
+      'sensor.gas_last_reading_date': state('2040-01-01T00:00:00+08:00'),
+    });
+    assert.equal(card._formatBeijingTimestamp(iso), expected);
+    assert.ok(card.shadowRoot.innerHTML.includes(`截止时间（北京时间）: ${expected}`));
+    assert.doesNotMatch(card.shadowRoot.innerHTML, /2040-01-01|NaN/);
+    assert.match(card.shadowRoot.innerHTML, /zr-gas-card v2\.1\.5/);
+  }
+});
+
+test('unknown or malformed cutoff shows an em dash without falling back to CRM reading time', () => {
+  const invalid = [
+    undefined, null, 0, '', 'unknown', 'unavailable', 'invalid',
+    '2026-11-24', '2026-11-24T00:32:34', '2026-02-30T00:32:34Z',
+    '2026-13-01T00:32:34Z', '2026-11-24T25:32:34Z',
+    '2026-11-24T00:32:34+25:00', '<img src=x onerror=alert(1)>',
+  ];
+  for (const value of invalid) {
+    const card = render({
+      'sensor.gas_balance': state(10),
+      'sensor.gas_meter_snapshot_time': state(value, { data_source: 'queryLatestMeterInfo.dataTime' }),
+      'sensor.gas_last_reading_date': state('2040-01-01T00:00:00+08:00'),
+    });
+    assert.equal(card._formatBeijingTimestamp(value), '—');
+    assert.match(card.shadowRoot.innerHTML, /截止时间（北京时间）: —/);
+    assert.doesNotMatch(card.shadowRoot.innerHTML, /2040-01-01|NaN|<img/);
   }
 });
 
