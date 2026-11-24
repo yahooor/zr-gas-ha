@@ -401,6 +401,27 @@ class TestPayBillHistory:
 # ── 来源标识 ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_cls", [ZrGasMpApi, ZrGasPayApi])
+@pytest.mark.parametrize("empty_year_succeeds", [False, True])
+async def test_failed_years_without_any_bills_are_not_a_confirmed_empty_history(
+    api_cls, empty_year_succeeds
+):
+    failed = {"status": 2, "msg": "temporary upstream error"}
+    first_year = {"status": 1, "data": []} if empty_year_succeeds else failed
+    payloads = [first_year, failed]
+    if api_cls is ZrGasMpApi:
+        payloads.insert(0, failed)  # full-range request triggers the yearly fallback
+    session = _FakeSession(payloads)
+    api = api_cls(session, access_token="synthetic", user_id="test")
+
+    with pytest.raises(ZrGasApiError, match="temporary upstream error") as exc:
+        await api.get_customer_money_list("synthetic-account", "204001", "204110")
+
+    assert not isinstance(exc.value, ZrGasBillsUnavailable)
+    assert len(session.calls) == len(payloads)
+
+
 class TestSourceAttribute:
     def test_source_constants(self):
         assert ZrGasMpApi(None).source == SOURCE_MP

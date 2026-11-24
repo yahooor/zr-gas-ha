@@ -794,9 +794,8 @@ class ZrGasMpApi(ZrGasBaseApi):
             start_year = end_year = int(end_time[:4]) if end_time[:4].isdigit() else 2026
 
         bills: list[ZrGasBill] = []
-        # 记录绑定失效错误：若最终一条账单都没拿到，说明是"查不到"而非"没有"，
-        # 需上抛 ZrGasBillsUnavailable 让上层降级（v2.2.3）
         binding_err: ZrGasApiError | None = None
+        latest_error: ZrGasApiError | None = None
         seen_periods: set[str] = set()
         for year in range(start_year, end_year + 1):
             year_start = f"{year}01"
@@ -812,6 +811,7 @@ class ZrGasMpApi(ZrGasBaseApi):
                     binding_err = err
                     break
                 # 单年失败不阻断其余年份（保持与账单 best-effort 语义一致）
+                latest_error = err
                 _LOGGER.warning("getCustomerMoneyList per-year query failed (%s): %s", year, err)
                 continue
 
@@ -825,10 +825,11 @@ class ZrGasMpApi(ZrGasBaseApi):
                 seen_periods.add(bill.period)
                 bills.append(bill)
 
-        # 命中绑定失效且一条账单都没拿到 → 判定为"不可用"，而非"没有账单"
-        if binding_err is not None and not bills:
-            raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
-
+        if not bills:
+            if binding_err is not None:
+                raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
+            if latest_error is not None:
+                raise latest_error
         return bills
 
 
@@ -961,6 +962,7 @@ class ZrGasPayApi(ZrGasBaseApi):
 
         bills: list[ZrGasBill] = []
         binding_err: ZrGasApiError | None = None
+        latest_error: ZrGasApiError | None = None
         for year in range(start_year, end_year + 1):
             url = f"{BASE_URL}{ENDPOINT_PAY_BILL_HISTORY}"
             timestamp = self._get_timestamp()
@@ -984,16 +986,18 @@ class ZrGasPayApi(ZrGasBaseApi):
                     binding_err = err
                     break
                 # 单年失败不阻断其余年份
+                latest_error = err
                 _LOGGER.warning("queryBillHistory failed (%s): %s", year, err)
                 continue
 
             _LOGGER.debug("queryBillHistory raw items (%s): %s", year, result.get("data"))
             bills.extend(_parse_bill_items(result.get("data")))
 
-        # 命中绑定失效且一条账单都没拿到 → 判定为"不可用"，而非"没有账单"
-        if binding_err is not None and not bills:
-            raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
-
+        if not bills:
+            if binding_err is not None:
+                raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
+            if latest_error is not None:
+                raise latest_error
         return bills
 
 
