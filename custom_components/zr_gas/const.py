@@ -97,6 +97,7 @@ ENDPOINT_CHECK_TOKEN = "/wisdom/auth/checkMasInfo"
 ENDPOINT_GET_CUSTOMERS = "/crm_controller/user/getBindGasCustList"
 ENDPOINT_GET_CUSTOMER_INFO = "/crm_controller/user/findCustInfoByCustCodeAndCustName"
 ENDPOINT_GET_BILLS = "/crm_controller/payfee/getCustomerMoneyList"
+ENDPOINT_METER_SNAPSHOT = "/zrmgr_iot/meterInfo/queryLatestMeterInfo.do"
 
 # ── 缴费端 (pay) 端点 — from packet capture ─────────────────────────
 ENDPOINT_PAY_SEND_SMS = "/crm_controller/user/sendSmsCode"

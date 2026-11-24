@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+import aiohttp
 import homeassistant.util.dt as dt_util
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -76,6 +77,7 @@ from .models import (
     TierConfig,
     YearlyStat,
     ZrGasBill,
+    ZrGasBillHistory,
     ZrGasDeviceData,
 )
 
@@ -134,7 +136,14 @@ def _calculate_monthly_stats(bills: list[ZrGasBill]) -> list[MonthlyStat]:
     """
     month_map: dict[str, MonthlyStat] = {}
     for bill in bills:
-        if not bill.period or len(bill.period) < 6:
+        period = bill.period
+        if not (
+            isinstance(period, str)
+            and len(period) == 6
+            and period.isascii()
+            and period.isdigit()
+            and "01" <= period[4:] <= "12"
+        ):
             continue
         # 格式化为 YYYY-MM
         month_key = f"{bill.period[:4]}-{bill.period[4:6]}"
@@ -236,19 +245,35 @@ def _calculate_annual_usage(
 def _pick_bills(
     bill_list: list[ZrGasBill], current_period: str
 ) -> tuple[ZrGasBill | None, ZrGasBill | None]:
-    """从账单列表选出当前账单与上一账单。
+    """Select the latest and preceding billed periods, summing split bills."""
+    by_period: dict[str, list[ZrGasBill]] = {}
+    for bill in bill_list:
+        p = bill.period
+        if (
+            p
+            and len(p) == 6
+            and p.isascii()
+            and p.isdigit()
+            and "01" <= p[4:] <= "12"
+            and p <= current_period
+        ):
+            by_period.setdefault(p, []).append(bill)
 
-    当前账单优先匹配 current_period，否则取最新一条；
-    上一账单为排序后当前账单的前一条（月付即上月，季付即上季）。
-    """
-    bills = sorted(bill_list, key=lambda b: b.period)
-    current = next((b for b in bills if b.period == current_period), None)
-    matched = current or (bills[-1] if bills else None)
-    previous = None
-    if matched is not None:
-        idx = bills.index(matched)
-        previous = bills[idx - 1] if idx > 0 else None
-    return matched, previous
+    def aggregate(period: str) -> ZrGasBill:
+        rows = by_period[period]
+        prices = {b.unit_price for b in rows}
+        return ZrGasBill(
+            period=period,
+            usage_volume=sum(b.usage_volume for b in rows),
+            usage_amount=sum(b.usage_amount for b in rows),
+            unit_price=prices.pop() if len(prices) == 1 else None,
+        )
+
+    periods = sorted(by_period, reverse=True)[:2]
+    return (
+        aggregate(periods[0]) if periods else None,
+        aggregate(periods[1]) if len(periods) == 2 else None,
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -461,7 +486,10 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 raise ConfigEntryAuthFailed(
                     f"Authentication failed for {self.cust_name}: {bills}"
                 ) from bills
-            bills_degraded = False
+            bill_missing_years = (
+                tuple(sorted(bills.missing_years)) if isinstance(bills, ZrGasBillHistory) else ()
+            )
+            bills_degraded = bool(bill_missing_years)
             if isinstance(bills, ZrGasBillsUnavailable):
                 # 账单接口不可用（典型：账号绑定失效）。与"真的没有账单"区分：
                 # 账单派生字段一律降级为 unavailable，避免 0.0 被误读为"没花钱"（v2.2.3）
@@ -495,8 +523,14 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 )
                 bills = []
                 bills_degraded = True
+            try:
+                meter_snapshot = await self._api.get_meter_snapshot(detail)
+            except (ZrGasApiError, aiohttp.ClientError, TimeoutError, ValueError) as err:
+                # Optional query: never substitute the unrelated CRM fields or log its response.
+                _LOGGER.debug("Meter snapshot unavailable (%s)", type(err).__name__)
+                meter_snapshot = None
             if isinstance(meter, Exception):
-                # Meter enrichment is best-effort (缴费端 only)
+                # Meter enrichment is best-effort
                 _LOGGER.debug(
                     "Meter info unavailable for %s (%s): %s",
                     self.cust_name,
@@ -517,15 +551,19 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             last_payment = payment_list[0] if payment_list else None
 
             # Find the most recent bill + previous bill for monthly usage/cost
-            monthly_usage = 0.0
-            monthly_cost = 0.0
-            period = current_period
-            unit_price = 0.0
-            last_month_usage = 0.0
-            last_month_cost = 0.0
+            monthly_usage = None
+            monthly_cost = None
+            period = ""
+            unit_price = None
+            last_month_usage = None
+            last_month_cost = None
             last_bill_period = ""
 
-            bill_list: list[ZrGasBill] = bills if isinstance(bills, list) else []
+            bill_list: list[ZrGasBill] = (
+                [bill for bill in bills if bill.period <= current_period]
+                if isinstance(bills, list)
+                else []
+            )
             if bill_list:
                 matched_bill, prev_bill = _pick_bills(bill_list, current_period)
                 if matched_bill is not None:
@@ -554,11 +592,14 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
 
             # 单价: 来源字段优先（缴费端 price / 当月账单单价），
             # 均缺失时从最近账单派生（实付/用量，预付费账户服务端不给单价）
-            gas_price = detail.gas_price or unit_price
-            price_source = "api" if gas_price else ""
-            if not gas_price and monthly_usage > 0 and monthly_cost > 0:
-                gas_price = round(monthly_cost / monthly_usage, 3)
-                price_source = "derived" if gas_price else ""
+            gas_price = detail.gas_price
+            if gas_price is None and not bills_degraded:
+                gas_price = unit_price
+            price_source = "api" if gas_price is not None else ""
+            if not bills_degraded and gas_price is None and monthly_usage and monthly_cost:
+                if monthly_usage > 0 and monthly_cost > 0:
+                    gas_price = round(monthly_cost / monthly_usage, 3)
+                    price_source = "derived"
 
             return ZrGasDeviceData(
                 source=self.source,
@@ -577,7 +618,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 max_gas=detail.max_gas,
                 cust_type=detail.cust_type,
                 last_record=detail.last_record,
-                qty_meter_balance=detail.qty_meter_balance,
+                meter_snapshot=meter_snapshot,
                 purch_times=detail.purch_times,
                 last_record_time=detail.last_record_time,
                 meter_no=detail.meter_no,
@@ -590,7 +631,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 vent_date=meter.vent_date if meter else "",
                 bar_code=meter.bar_code if meter else "",
                 meter_loc=meter.meter_loc if meter else "",
-                last_payment=last_payment.amount if last_payment else 0.0,
+                last_payment=last_payment.amount if last_payment else None,
                 last_payment_time=last_payment.pay_time if last_payment else "",
                 payment_history=payment_list,
                 last_month_usage=last_month_usage,
@@ -607,6 +648,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
                 monthly_stats=monthly_stats,
                 yearly_stats=yearly_stats,
                 bills_degraded=bills_degraded,
+                bill_missing_years=bill_missing_years,
             )
 
         except ConfigEntryAuthFailed:
@@ -638,7 +680,7 @@ class ZrGasDataUpdateCoordinator(DataUpdateCoordinator[ZrGasDeviceData]):
             ir.async_delete_issue(self.hass, DOMAIN, f"token_expired_{self.cust_code}")
 
             # ── Balance threshold alert ────────────────────────
-            if detail.balance < self.balance_threshold:
+            if detail.balance is not None and detail.balance < self.balance_threshold:
                 ir.async_create_issue(
                     self.hass,
                     DOMAIN,

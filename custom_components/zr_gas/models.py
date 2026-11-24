@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -35,16 +36,16 @@ class ZrGasCustomerDetail:
     cust_code: str
     cust_name: str
     cust_address: str
-    balance: float
-    owe_money: float = 0.0
-    new_owe_money: float = 0.0
-    award_money: float = 0.0
-    gas_price: float = 0.0
-    max_gas: float = 0.0
+    balance: float | None
+    owe_money: float | None = None
+    new_owe_money: float | None = None
+    award_money: float | None = None
+    gas_price: float | None = None
+    max_gas: float | None = None
     cust_type: str = ""
-    last_record: float = 0.0
-    qty_meter_balance: float = 0.0
-    purch_times: int = 0
+    last_record: float | None = None
+    qty_meter_balance: float = 0.0  # CRM 档案字段，不用于表内气量传感器
+    purch_times: int | None = None
     last_record_time: str = ""
     meter_no: str = ""
     meter_form_name: str = ""
@@ -52,6 +53,25 @@ class ZrGasCustomerDetail:
     comp_name: str = ""
     cust_status: str = ""
     fee: str = ""
+    meter_type: str = ""
+    card_type_code: str = ""
+    sub_card_type: str = ""
+
+    @property
+    def supports_volume_snapshot(self) -> bool:
+        """Match the portal's confirmed volume IoT card types, not money meters."""
+        return self.meter_type == "02" and (
+            (self.card_type_code == "2800" and self.sub_card_type in {"12", "22", "32"})
+            or (self.card_type_code == "4" and self.sub_card_type == "3")
+        )
+
+
+@dataclass(frozen=True)
+class ZrGasMeterSnapshot:
+    """Latest reported in-meter volume and its upstream cutoff time."""
+
+    volume: float
+    as_of: datetime
 
 
 @dataclass
@@ -76,7 +96,15 @@ class ZrGasBill:
     period: str  # 账期，格式 YYYYMM
     usage_volume: float  # 用气量 (m³)
     usage_amount: float  # 费用金额 (CNY)
-    unit_price: float  # 单价 (CNY/m³)
+    unit_price: float | None  # 单价 (CNY/m³)
+
+
+class ZrGasBillHistory(list[ZrGasBill]):
+    """Preserve available rows and identify unsuccessful or skipped year slices."""
+
+    def __init__(self, bills: list[ZrGasBill], missing_years: set[int]) -> None:
+        super().__init__(bills)
+        self.missing_years = frozenset(missing_years)
 
 
 @dataclass
@@ -88,8 +116,8 @@ class ZrGasPayment:
     """
 
     pay_time: str = ""  # 缴费时间
-    amount: float = 0.0  # 缴费金额 (CNY)
-    qty: float = 0.0  # 购气量 (m³)
+    amount: float | None = None  # 缴费金额 (CNY)
+    qty: float | None = None  # 购气量 (m³)
     pay_type: str = ""  # 缴费方式
 
 
@@ -200,23 +228,23 @@ class ZrGasDeviceData:
     """
 
     source: str  # 数据来源: SOURCE_MP / SOURCE_PAY
-    balance: float  # 账户余额 (CNY)
+    balance: float | None  # 账户余额 (CNY)
     cust_code: str
     cust_name: str
     cust_address: str
-    monthly_usage: float  # 当月用气量 (m³)
-    monthly_cost: float  # 当月费用 (CNY)
-    period: str  # 当前账期 YYYYMM
-    unit_price: float  # 当月单价 (CNY/m³)
-    owe_money: float = 0.0
-    new_owe_money: float = 0.0
-    award_money: float = 0.0
-    gas_price: float = 0.0
-    max_gas: float = 0.0
+    monthly_usage: float | None  # 最新账期用气量 (m³)
+    monthly_cost: float | None  # 最新账期费用 (CNY)
+    period: str  # 最新账期 YYYYMM；无账期时为空
+    unit_price: float | None  # 最新账期单价 (CNY/m³)
+    owe_money: float | None = None
+    new_owe_money: float | None = None
+    award_money: float | None = None
+    gas_price: float | None = None
+    max_gas: float | None = None
     cust_type: str = ""
-    last_record: float = 0.0
-    qty_meter_balance: float = 0.0
-    purch_times: int = 0
+    last_record: float | None = None
+    meter_snapshot: ZrGasMeterSnapshot | None = None
+    purch_times: int | None = None
     last_record_time: str = ""
     meter_no: str = ""
     meter_form_name: str = ""
@@ -230,12 +258,12 @@ class ZrGasDeviceData:
     bar_code: str = ""
     meter_loc: str = ""
     # 缴费记录（最近一次金额 + 历史列表）
-    last_payment: float = 0.0  # 最近一次缴费金额 (CNY)
+    last_payment: float | None = None  # 最近一次缴费金额 (CNY)
     last_payment_time: str = ""
     payment_history: list[ZrGasPayment] = field(default_factory=list)
-    # 上一账单周期（月付用户即上月；季付用户即上季）
-    last_month_usage: float = 0.0  # 上期用气量 (m³)
-    last_month_cost: float = 0.0  # 上期费用 (CNY)
+    # 上一实际账期，不一定是上一个自然月。
+    last_month_usage: float | None = None  # 上期用气量 (m³)
+    last_month_cost: float | None = None  # 上期费用 (CNY)
     last_bill_period: str = ""  # 上期账期 YYYYMM
     # 年度费用与阶梯额度
     annual_cost: float = 0.0  # 年度累计费用 (CNY)
@@ -254,6 +282,7 @@ class ZrGasDeviceData:
     # True 表示账单查询失败（如账号绑定失效），账单派生字段不可信，
     # 传感器应报 unavailable 而不是 0.0 —— 否则「查不到」会被误读为「这个月没花钱」。
     bills_degraded: bool = False
+    bill_missing_years: tuple[int, ...] = ()
 
 
 # ── 账单降级判定（v2.2.3）─────────────────────────────────────────────

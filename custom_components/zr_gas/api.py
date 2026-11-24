@@ -24,10 +24,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import hashlib
 import json
 import logging
+import math
+import re
 import time
 from typing import Any
 
@@ -42,6 +45,7 @@ from .const import (
     ENDPOINT_GET_CUSTOMERS,
     ENDPOINT_INIT,
     ENDPOINT_LOGIN_SMS,
+    ENDPOINT_METER_SNAPSHOT,
     ENDPOINT_PAY_BILL_HISTORY,
     ENDPOINT_PAY_METER_INFO,
     ENDPOINT_PAYMENT_LOG,
@@ -56,9 +60,11 @@ from .const import (
 )
 from .models import (
     ZrGasBill,
+    ZrGasBillHistory,
     ZrGasCustomer,
     ZrGasCustomerDetail,
     ZrGasMeterInfo,
+    ZrGasMeterSnapshot,
     ZrGasPayment,
 )
 
@@ -119,20 +125,37 @@ class ZrGasBillsUnavailable(ZrGasApiError):
         return miniapp_label(self.source)
 
 
-def _to_float(val: Any, default: float = 0.0) -> float:
-    """Best-effort float conversion for API values."""
-    try:
-        return float(val) if val is not None else default
-    except (ValueError, TypeError):
-        return default
+def _first_number(*values: Any) -> float | None:
+    """Return the first valid number, keeping zero distinct from a missing value."""
+    for value in values:
+        if not isinstance(value, (int, float, str)) or isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (ValueError, OverflowError):
+            continue
+        if math.isfinite(number):
+            return number
+    return None
 
 
-def _to_int(val: Any, default: int = 0) -> int:
-    """Best-effort int conversion for API values."""
-    try:
-        return int(float(val)) if val is not None else default
-    except (ValueError, TypeError):
-        return default
+def _to_float(val: Any) -> float:
+    """Legacy fallback for billing rows whose schema treats missing values as zero."""
+    value = _first_number(val)
+    return 0.0 if value is None else value
+
+
+def _optional_int(val: Any) -> int | None:
+    number = _first_number(val)
+    return int(number) if number is not None and number.is_integer() else None
+
+
+def _meter_type_fields(info: dict[str, Any]) -> dict[str, str]:
+    return {
+        "meter_type": str(info.get("metertype") or info.get("meterType") or "").strip(),
+        "card_type_code": str(info.get("cardType") or info.get("cardTypeCode") or "").strip(),
+        "sub_card_type": str(info.get("subCardType") or "").strip(),
+    }
 
 
 class ZrGasBaseApi:
@@ -276,8 +299,6 @@ class ZrGasBaseApi:
         }
 
         result = await self._post(url, data)
-        _LOGGER.debug("getPaymentLogForHsh raw items: %s", result.get("data"))
-
         items = result.get("data") or []
         if isinstance(items, dict):
             items = [items]
@@ -291,8 +312,8 @@ class ZrGasBaseApi:
                     or item.get("time")
                     or ""
                 ),
-                amount=_to_float(item.get("amount") or item.get("payFee") or item.get("money")),
-                qty=_to_float(item.get("payQty") or item.get("qty")),
+                amount=_first_number(item.get("amount"), item.get("payFee"), item.get("money")),
+                qty=_first_number(item.get("payQty"), item.get("qty")),
                 pay_type=str(
                     item.get("paytypedesc") or item.get("payType") or item.get("payTypeName") or ""
                 ),
@@ -301,6 +322,48 @@ class ZrGasBaseApi:
         ]
         payments.sort(key=lambda p: p.pay_time, reverse=True)
         return payments
+
+    async def get_meter_snapshot(self, detail: ZrGasCustomerDetail) -> ZrGasMeterSnapshot | None:
+        """Read the portal's last report for confirmed volume IoT meters only."""
+        card = detail.card_no.strip() if isinstance(detail.card_no, str) else ""
+        if (
+            not detail.supports_volume_snapshot
+            or card.lower() in {"undefined", "null", "none"}
+            or not re.fullmatch(r"[A-Za-z0-9]{4,40}", card)
+        ):
+            return None
+
+        async with asyncio.timeout(8):
+            result = await self._post(
+                f"{BASE_URL}{ENDPOINT_METER_SNAPSHOT}",
+                {"icCardCode": card},
+                allow_redirects=False,
+            )
+        snapshot = result.get("data")
+        if not isinstance(snapshot, dict):
+            return None
+        unit = snapshot.get("unit")
+        if unit not in (None, "", "m³", "m3", "方", "立方米"):
+            return None
+        volume = _first_number(snapshot.get("effeGas"))
+        raw_time = snapshot.get("dataTime")
+        if volume is None or not isinstance(raw_time, str):
+            return None
+        raw_time = raw_time.strip()
+        if not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})?",
+            raw_time,
+        ):
+            return None
+        try:
+            as_of = datetime.datetime.fromisoformat(raw_time)
+        except ValueError:
+            return None
+        if as_of.tzinfo is None:
+            # The service's timezone-less timestamps match the China portal clock.
+            as_of = as_of.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
+        return ZrGasMeterSnapshot(volume, as_of)
 
     # ── Meter enrichment (best-effort, any source) ─────────────────
 
@@ -357,6 +420,8 @@ class ZrGasBaseApi:
         data: dict[str, Any],
         headers: dict[str, str] | None = None,
         as_json: bool = False,
+        *,
+        allow_redirects: bool = True,
     ) -> dict[str, Any]:
         """Send a POST request and return the normalized JSON response.
 
@@ -391,18 +456,20 @@ class ZrGasBaseApi:
             kwargs["json"] = data
         else:
             kwargs["data"] = data
+        if not allow_redirects:
+            kwargs["allow_redirects"] = False
 
         async with self._session.post(url, **kwargs) as resp:
             if resp.status in (401, 403):
                 raise ZrGasAuthError(f"HTTP {resp.status}: authentication failed")
+            if not allow_redirects and 300 <= resp.status < 400:
+                raise ZrGasApiError("Unexpected redirect from meter snapshot endpoint")
             resp.raise_for_status()
-            result: dict[str, Any] = await resp.json()
+            result = await resp.json()
+        if not isinstance(result, dict):
+            raise ZrGasApiError("Unexpected response shape")
 
-        _LOGGER.debug(
-            "Response status=%s message=%s",
-            result.get("status"),
-            result.get("message"),
-        )
+        _LOGGER.debug("Response status=%s", result.get("status"))
 
         # Response status normalization.
         # NOTE: status may be int (1) or string ("1"); checkMasInfo instead
@@ -685,32 +752,34 @@ class ZrGasMpApi(ZrGasBaseApi):
 
         result = await self._post(url, data)
 
-        info = result.get("data") or {}
-
-        balance_str = (
-            info.get("countMoney") or info.get("newCountMoney") or info.get("balance") or "0"
-        )
+        info = result.get("data")
+        if not isinstance(info, dict) or not info:
+            raise ZrGasApiError("Customer detail is empty")
 
         return ZrGasCustomerDetail(
             cust_code=info.get("custCode", cust_code),
             cust_name=info.get("custName", cust_name),
             cust_address=info.get("address", ""),
-            balance=_to_float(balance_str),
-            owe_money=_to_float(info.get("oweMoney")),
-            award_money=_to_float(info.get("awardMoney")),
-            last_record=_to_float(info.get("lastRecord")),
+            balance=_first_number(
+                info.get("countMoney"), info.get("newCountMoney"), info.get("balance")
+            ),
+            owe_money=_first_number(info.get("oweMoney")),
+            new_owe_money=_first_number(info.get("newOweMoney")),
+            award_money=_first_number(info.get("awardMoney")),
+            last_record=_first_number(info.get("lastRecord")),
             qty_meter_balance=_to_float(info.get("qtyMeterBalance")),
-            purch_times=_to_int(info.get("purchTimes")),
+            purch_times=_optional_int(info.get("purchTimes")),
             last_record_time=info.get("lastRecordTime", ""),
             meter_no=info.get("meterNo", ""),
             meter_form_name=info.get("meterFormName", ""),
             card_no=info.get("cardNo", ""),
-            gas_price=_to_float(info.get("price")),
-            max_gas=_to_float(info.get("maxGas")),
+            gas_price=_first_number(info.get("price")),
+            max_gas=_first_number(info.get("maxGas")),
             cust_type=info.get("custType", ""),
             comp_name=info.get("compName", ""),
             cust_status=info.get("custStatus", ""),
             fee=info.get("fee", ""),
+            **_meter_type_fields(info),
         )
 
     async def get_customer_money_list(
@@ -747,10 +816,9 @@ class ZrGasMpApi(ZrGasBaseApi):
             )
             return await self._query_money_list_by_year(cust_code, start_time, end_time)
 
-        _LOGGER.debug("getCustomerMoneyList raw data: %s", result.get("data"))
         raw = result.get("data")
         # 实测: data 可能是账单数组（旧格式），也可能是对象、账单藏于 payGasCheckList
-        if isinstance(raw, dict) and raw.get("payGasCheckList"):
+        if isinstance(raw, dict) and "payGasCheckList" in raw:
             raw = raw["payGasCheckList"]
         return _parse_bill_items(raw)
 
@@ -784,7 +852,8 @@ class ZrGasMpApi(ZrGasBaseApi):
         """按自然年切片循环查询 getCustomerMoneyList 并合并去重。
 
         每年一次请求（startTime=年初, endTime=年末），签名方式不变。
-        合并结果按账单 period 去重，保留先出现的条目。
+        同一账期可能有多笔：仅接纳该账期所属年份切片，
+        保留该切片内的全部合法账单。
         """
         try:
             start_year = int(start_time[:4])
@@ -795,8 +864,8 @@ class ZrGasMpApi(ZrGasBaseApi):
 
         bills: list[ZrGasBill] = []
         binding_err: ZrGasApiError | None = None
-        latest_error: ZrGasApiError | None = None
-        seen_periods: set[str] = set()
+        latest_error: Exception | None = None
+        missing_years: set[int] = set()
         for year in range(start_year, end_year + 1):
             year_start = f"{year}01"
             year_end = f"{year}12"
@@ -809,28 +878,25 @@ class ZrGasMpApi(ZrGasBaseApi):
                 if _is_binding_error(err):
                     self._log_binding_lost(err, detail="；跳过后续年份账单查询")
                     binding_err = err
+                    missing_years.update(range(year, end_year + 1))
                     break
-                # 单年失败不阻断其余年份（保持与账单 best-effort 语义一致）
+                # 单年失败不阻断其余年份，但不能声称汇总完整。
                 latest_error = err
-                _LOGGER.warning("getCustomerMoneyList per-year query failed (%s): %s", year, err)
+                missing_years.add(year)
+                _LOGGER.warning("getCustomerMoneyList per-year query failed (%s)", year)
                 continue
 
-            _LOGGER.debug("getCustomerMoneyList raw data (%s): %s", year, result.get("data"))
             raw = result.get("data")
-            if isinstance(raw, dict) and raw.get("payGasCheckList"):
+            if isinstance(raw, dict) and "payGasCheckList" in raw:
                 raw = raw["payGasCheckList"]
-            for bill in _parse_bill_items(raw):
-                if bill.period in seen_periods:
-                    continue
-                seen_periods.add(bill.period)
-                bills.append(bill)
+            bills.extend(bill for bill in _parse_bill_items(raw) if bill.period[:4] == str(year))
 
         if not bills:
             if binding_err is not None:
                 raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
             if latest_error is not None:
                 raise latest_error
-        return bills
+        return ZrGasBillHistory(bills, missing_years) if missing_years else bills
 
 
 class ZrGasPayApi(ZrGasBaseApi):
@@ -913,24 +979,26 @@ class ZrGasPayApi(ZrGasBaseApi):
 
         result = await self._post(url, data)
 
-        info = result.get("data") or {}
-
-        balance_str = info.get("qtyBalance") or info.get("countMoney") or info.get("balance") or "0"
+        info = result.get("data")
+        if not isinstance(info, dict) or not info:
+            raise ZrGasApiError("Customer detail is empty")
 
         return ZrGasCustomerDetail(
             cust_code=info.get("custCode", cust_code),
             cust_name=info.get("custName", cust_name),
             cust_address=info.get("address", ""),
-            balance=_to_float(balance_str),
-            owe_money=_to_float(info.get("oweMoney")),
-            new_owe_money=_to_float(info.get("newOweMoney")),
-            award_money=_to_float(info.get("awardMoney")),
-            gas_price=_to_float(info.get("price")),
-            max_gas=_to_float(info.get("maxGas")),
+            balance=_first_number(
+                info.get("qtyBalance"), info.get("countMoney"), info.get("balance")
+            ),
+            owe_money=_first_number(info.get("oweMoney")),
+            new_owe_money=_first_number(info.get("newOweMoney")),
+            award_money=_first_number(info.get("awardMoney")),
+            gas_price=_first_number(info.get("price")),
+            max_gas=_first_number(info.get("maxGas")),
             cust_type=info.get("custType", ""),
-            last_record=_to_float(info.get("lastRecord")),
+            last_record=_first_number(info.get("lastRecord")),
             qty_meter_balance=_to_float(info.get("qtyMeterBalance")),
-            purch_times=_to_int(info.get("purchTimes")),
+            purch_times=_optional_int(info.get("purchTimes")),
             last_record_time=info.get("lastRecordTime", ""),
             meter_no=info.get("meterNo", ""),
             meter_form_name=info.get("meterFormName", ""),
@@ -938,6 +1006,7 @@ class ZrGasPayApi(ZrGasBaseApi):
             comp_name=info.get("compName", ""),
             cust_status=info.get("custStatus", ""),
             fee=info.get("fee", ""),
+            **_meter_type_fields(info),
         )
 
     async def get_customer_money_list(
@@ -962,7 +1031,8 @@ class ZrGasPayApi(ZrGasBaseApi):
 
         bills: list[ZrGasBill] = []
         binding_err: ZrGasApiError | None = None
-        latest_error: ZrGasApiError | None = None
+        latest_error: Exception | None = None
+        missing_years: set[int] = set()
         for year in range(start_year, end_year + 1):
             url = f"{BASE_URL}{ENDPOINT_PAY_BILL_HISTORY}"
             timestamp = self._get_timestamp()
@@ -984,32 +1054,42 @@ class ZrGasPayApi(ZrGasBaseApi):
                 if _is_binding_error(err):
                     self._log_binding_lost(err, detail="；跳过后续年份账单查询")
                     binding_err = err
+                    missing_years.update(range(year, end_year + 1))
                     break
-                # 单年失败不阻断其余年份
+                # 单年失败不阻断其余年份，但不能声称汇总完整。
                 latest_error = err
-                _LOGGER.warning("queryBillHistory failed (%s): %s", year, err)
+                missing_years.add(year)
+                _LOGGER.warning("queryBillHistory failed (%s)", year)
                 continue
 
-            _LOGGER.debug("queryBillHistory raw items (%s): %s", year, result.get("data"))
-            bills.extend(_parse_bill_items(result.get("data")))
+            bills.extend(
+                bill
+                for bill in _parse_bill_items(result.get("data"))
+                if bill.period[:4] == str(year)
+            )
 
         if not bills:
             if binding_err is not None:
                 raise ZrGasBillsUnavailable(str(binding_err), self.source) from binding_err
             if latest_error is not None:
                 raise latest_error
-        return bills
+        return ZrGasBillHistory(bills, missing_years) if missing_years else bills
 
 
 def _usage_amount(item: dict[str, Any]) -> float:
     """账单金额：应收优先；预付费账户 receivable 恒为 "0.00"（真值字符串，
     不能用 or 链短路），按数值判断后回退实收 received/gasFee。"""
-    receivable = _to_float(item.get("receivable"))
-    if receivable > 0:
+    receivable = _first_number(item.get("receivable"))
+    if receivable is not None and receivable != 0:
         return receivable
-    return _to_float(
-        item.get("received") or item.get("gasFee") or item.get("usageAmount") or item.get("payFee")
+    fallback = _first_number(
+        item.get("received"), item.get("gasFee"), item.get("usageAmount"), item.get("payFee")
     )
+    if fallback is not None:
+        return fallback
+    if receivable is not None:
+        return receivable
+    raise ZrGasApiError("Bill history contains a missing or invalid amount")
 
 
 def _parse_bill_items(items: Any) -> list[ZrGasBill]:
@@ -1025,21 +1105,31 @@ def _parse_bill_items(items: Any) -> list[ZrGasBill]:
         return []
     if isinstance(items, dict):
         items = [items]
+    if not isinstance(items, list):
+        raise ZrGasApiError("Unexpected bill history shape")
 
     bills: list[ZrGasBill] = []
     for item in items:
+        if not isinstance(item, dict):
+            raise ZrGasApiError("Unexpected bill row shape")
         period = item.get("recordMonth") or item.get("period") or item.get("billingCycle") or ""
-        # Normalize period to YYYYMM (strip separators if present)
-        period = period.replace("-", "").replace("/", "")[:6]
+        if not isinstance(period, str):
+            raise ZrGasApiError("Bill history contains an invalid period")
+        # Match the entire supported value before normalization; never truncate bad suffixes.
+        if not re.fullmatch(r"[0-9]{4}(?:0[1-9]|1[0-2])|[0-9]{4}[-/](?:0[1-9]|1[0-2])", period):
+            raise ZrGasApiError("Bill history contains an invalid period")
+        period = period.replace("-", "").replace("/", "")
+        volume = _first_number(item.get("curQty"), item.get("usageVolume"), item.get("gasVolume"))
+        if volume is None:
+            # Reject the entire response, not just this row: partial totals are misleading.
+            raise ZrGasApiError("Bill history contains a missing or invalid volume")
 
         bills.append(
             ZrGasBill(
                 period=period,
-                usage_volume=_to_float(
-                    item.get("curQty") or item.get("usageVolume") or item.get("gasVolume")
-                ),
+                usage_volume=volume,
                 usage_amount=_usage_amount(item),
-                unit_price=_to_float(item.get("price") or item.get("unitPrice")),
+                unit_price=_first_number(item.get("price"), item.get("unitPrice")),
             )
         )
     return bills

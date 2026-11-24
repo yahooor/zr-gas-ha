@@ -17,7 +17,7 @@
  *   show_meter: true        # show meter info footer (default true)
  */
 
-const CARD_VERSION = '2.1.3';
+const CARD_VERSION = '2.1.4';
 
 class ZrGasCard extends HTMLElement {
   static get styles() {
@@ -195,12 +195,26 @@ class ZrGasCard extends HTMLElement {
   // sensor.zhong_ran_xx_balance → sensor.zhong_ran_xx_<key>
   // 兼容 HA 翻译 slug（amount_owed 等）与原始 key（owe_money 等）
   _sibling(key) {
-    const base = this.config.entity.replace(/_balance$/, '');
+    const explicit = this.config.entities?.[key];
+    if (explicit) return this._hass.states[explicit];
+    const mainAttrs = this._hass.states[this.config.entity]?.attributes || {};
+    if (mainAttrs.cust_code && mainAttrs.source) {
+      const sibling = Object.values(this._hass.states).find(st =>
+        st.attributes?.cust_code === mainAttrs.cust_code &&
+        st.attributes?.source === mainAttrs.source && st.attributes?.sensor_key === key);
+      if (sibling) return sibling;
+    }
+    const base = this.config.entity.replace(/_(?:balance|yu_e)(?:_\d+)?$/, '');
     const candidates = {
       owe_money: ['amount_owed', 'owe_money'],
-      qty_meter_balance: ['gas_volume_balance', 'qty_meter_balance'],
+      qty_meter_balance: ['in_meter_gas_volume', 'gas_volume_balance', 'qty_meter_balance'],
       purch_times: ['purchase_count', 'purch_times'],
       last_record: ['meter_reading', 'last_record'],
+      meter_snapshot_time: ['data_cutoff_time', 'meter_snapshot_time'],
+      monthly_usage: ['current_period_usage', 'monthly_usage'],
+      monthly_cost: ['current_period_cost', 'monthly_cost'],
+      last_month_usage: ['previous_period_usage', 'last_month_usage'],
+      last_month_cost: ['previous_period_cost', 'last_month_cost'],
     }[key] || [key];
     for (const k of candidates) {
       const st = this._hass.states[`${base}_${k}`];
@@ -213,8 +227,8 @@ class ZrGasCard extends HTMLElement {
     if (!state || state.state === 'unavailable' || state.state === 'unknown') {
       return `<span class="item-unit">--</span>`;
     }
-    const val = parseFloat(state.state);
-    if (Number.isNaN(val)) return state.state;
+    const val = Number(state.state);
+    if (state.state === '' || !Number.isFinite(val)) return '<span class="item-unit">--</span>';
     return `${val.toFixed(digits)}${unit ? `<span class="item-unit"> ${unit}</span>` : ''}`;
   }
 
@@ -242,7 +256,7 @@ class ZrGasCard extends HTMLElement {
     const attrs = main.attributes || {};
     const source = attrs.source === 'pay' ? '缴费端' : '在线端';
     const title = this.config.title || '中燃在线';
-    const threshold = this.config.low_threshold || 50;
+    const threshold = this.config.low_threshold ?? 50;
     const showUsage = this.config.show_usage !== false;
     const showMeter = this.config.show_meter !== false;
 
@@ -269,16 +283,16 @@ class ZrGasCard extends HTMLElement {
       gridHtml = `
         <div class="grid">
           <div class="item">
-            <div class="item-label">月用量</div>
+            <div class="item-label">本期用气量</div>
             <div class="item-value">${this._fmt(monthlyUsage, 2, 'm³')}</div>
           </div>
           <div class="item">
-            <div class="item-label">月费用</div>
+            <div class="item-label">本期费用</div>
             <div class="item-value">${this._fmt(monthlyCost, 2, '元')}</div>
           </div>
           <div class="item">
-            <div class="item-label">气量余额</div>
-            <div class="item-value">${this._fmt(gasBalance, 1, 'm³')}</div>
+            <div class="item-label">${gasBalance?.attributes?.data_source === 'queryLatestMeterInfo.effeGas' ? '表内气量' : '气量余额（旧接口）'}</div>
+            <div class="item-value">${this._fmt(gasBalance, 2, 'm³')}</div>
           </div>
           <div class="item">
             <div class="item-label">欠费</div>
@@ -286,16 +300,17 @@ class ZrGasCard extends HTMLElement {
           </div>
           ${gasPrice ? `
           <div class="item">
-            <div class="item-label">单价</div>
+            <div class="item-label">${gasPrice.attributes?.price_source === 'derived' ? '推算单价' : '单价'}</div>
             <div class="item-value">${this._fmt(gasPrice, 2, '元/m³')}</div>
           </div>` : ''}
           <div class="item">
             <div class="item-label">购气次数</div>
-            <div class="item-value">${purchTimes ? purchTimes.state : '--'}</div>
+            <div class="item-value">${this._fmt(purchTimes, 0)}</div>
           </div>
         </div>`;
 
-      if (annualUsage && annualUsage.state !== 'unavailable') {
+      if (annualUsage && Number.isFinite(Number(annualUsage.state)) &&
+          annualUsage.attributes?.history_complete !== false) {
         const tier = annualAttrs.current_tier || 1;
         const tierPrice = annualAttrs.current_tier_price;
         const remaining = annualAttrs.tier_remaining;
@@ -333,7 +348,12 @@ class ZrGasCard extends HTMLElement {
       if (attrs.meter_form_name) infoParts.push(`型号: ${attrs.meter_form_name}`);
       if (attrs.card_no) infoParts.push(`卡号: ${attrs.card_no}`);
       if (attrs.meter_loc) infoParts.push(`位置: ${attrs.meter_loc}`);
-      if (lastRecord && lastRecord.state !== 'unavailable') {
+      const cutoff = this._sibling('meter_snapshot_time');
+      if (cutoff?.attributes?.data_source === 'queryLatestMeterInfo.dataTime' &&
+          cutoff.state !== 'unknown' && cutoff.state !== 'unavailable') {
+        infoParts.push(`截止时间: ${cutoff.state}`);
+      }
+      if (lastRecord && Number.isFinite(Number(lastRecord.state))) {
         infoParts.push(`读数: ${parseFloat(lastRecord.state).toFixed(0)} m³`);
       }
       if (infoParts.length) {

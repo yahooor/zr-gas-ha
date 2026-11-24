@@ -204,6 +204,136 @@ class TestStatusNormalization:
         assert "accessFrom" not in headers
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [0, "0", "31.75"])
+async def test_meter_snapshot_reads_fresh_volume_and_cutoff(value):
+    detail = {
+        "custCode": "C01",
+        "cardNo": "0001234",
+        "metertype": "02",
+        "cardType": "2800",
+        "subCardType": "22",
+        "qtyMeterBalance": "876",
+    }
+    session = _FakeSession(
+        [
+            {"status": 1, "data": detail},
+            {"status": 1, "data": {"effeGas": value, "dataTime": "2041-02-12 04:05:06"}},
+        ]
+    )
+    api = ZrGasMpApi(session)
+    account = await api.get_cust_info("C01", "Example")
+    snapshot = await api.get_meter_snapshot(account)
+    assert snapshot.volume == float(value)
+    assert snapshot.as_of.isoformat() == "2041-02-12T04:05:06+08:00"
+    assert session.calls[-1][0].endswith("/zrmgr_iot/meterInfo/queryLatestMeterInfo.do")
+    assert session.calls[-1][1]["data"] == {"icCardCode": "0001234"}
+    assert session.calls[-1][1]["allow_redirects"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "card_type,sub_type,card",
+    [
+        ("5200", "22", "0001234"),
+        ("2800", "", "0001234"),
+        ("2800", "22", ""),
+        ("2800", "22", "undefined"),
+    ],
+)
+async def test_meter_snapshot_skips_money_or_unconfirmed_meter(card_type, sub_type, card):
+    session = _FakeSession(
+        {
+            "status": 1,
+            "data": {
+                "custCode": "C01",
+                "cardNo": card,
+                "metertype": "02",
+                "cardType": card_type,
+                "subCardType": sub_type,
+            },
+        }
+    )
+    api = ZrGasMpApi(session)
+    assert await api.get_meter_snapshot(await api.get_cust_info("C01", "Example")) is None
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"effeGas": "NaN"},
+        {"effeGas": False},
+        {"effeGas": None},
+        {"dataTime": "2041-02-12"},
+        {"dataTime": "2041-02-30 00:00:00"},
+        {"unit": "元"},
+    ],
+)
+async def test_meter_snapshot_rejects_invalid_or_unit_conflicting_payload(bad):
+    session = _FakeSession(
+        [
+            {
+                "status": 1,
+                "data": {
+                    "custCode": "C01",
+                    "cardNo": "0001234",
+                    "metertype": "02",
+                    "cardType": "2800",
+                    "subCardType": "12",
+                },
+            },
+            {"status": 1, "data": {"effeGas": 19.25, "dataTime": "2041-02-12 04:05:06", **bad}},
+        ]
+    )
+    api = ZrGasMpApi(session)
+    assert await api.get_meter_snapshot(await api.get_cust_info("C01", "Example")) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client,primary", [(ZrGasMpApi, "countMoney"), (ZrGasPayApi, "qtyBalance")]
+)
+@pytest.mark.parametrize("zero", [0, "0"])
+async def test_numeric_zero_does_not_fall_through_to_another_balance(client, primary, zero):
+    session = _FakeSession(
+        {
+            "status": 1,
+            "data": {
+                "countMoney": 41,
+                "newCountMoney": 35,
+                "qtyBalance": 58,
+                primary: zero,
+                "lastRecord": "",
+                "awardMoney": None,
+                "oweMoney": "bad",
+                "maxGas": "0",
+            },
+        }
+    )
+    detail = await client(session).get_cust_info("C01", "Example")
+    assert detail.balance == 0
+    assert detail.last_record is None and detail.award_money is None and detail.owe_money is None
+    assert detail.max_gas == 0 and detail.purch_times is None
+
+
+@pytest.mark.asyncio
+async def test_payment_preserves_zero_and_does_not_fabricate_purchase_volume():
+    session = _FakeSession(
+        {
+            "status": 1,
+            "data": [
+                {"timeope": "2041-02-12 13:00:00", "amount": 0, "payFee": 30, "qty": None},
+                {"timeope": "2041-02-11 13:00:00", "amount": "", "qty": 0},
+            ],
+        }
+    )
+    recent, earlier = await ZrGasMpApi(session).get_payment_log("C01")
+    assert recent.amount == 0 and recent.qty is None
+    assert earlier.amount is None and earlier.qty == 0
+
+
 # ── 双源字段映射 (field mapping differs between sources) ─────────────
 
 
@@ -240,9 +370,9 @@ class TestMpCustInfoMapping:
         assert detail.purch_times == 12
         assert detail.meter_no == "M-001"
         # 在线端不提供的新字段默认为空
-        assert detail.gas_price == 0.0
-        assert detail.max_gas == 0.0
-        assert detail.new_owe_money == 0.0
+        assert detail.gas_price is None
+        assert detail.max_gas is None
+        assert detail.new_owe_money is None
 
 
 class TestPayCustInfoMapping:
@@ -363,10 +493,38 @@ class TestParseBillItems:
         )
         assert len(bills) == 1
 
-    def test_invalid_numbers_become_zero(self):
-        bills = _parse_bill_items([{"recordMonth": "202610", "curQty": "abc", "receivable": None}])
-        assert bills[0].usage_volume == 0.0
-        assert bills[0].usage_amount == 0.0
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            {"curQty": "abc", "receivable": None},
+            {"curQty": 1, "receivable": None},
+            {"curQty": None, "receivable": 3},
+            {"curQty": False, "receivable": 3},
+            {"curQty": 1, "receivable": "NaN"},
+        ],
+    )
+    def test_missing_or_invalid_key_numbers_reject_entire_payload(self, invalid):
+        with pytest.raises(ZrGasApiError, match="missing or invalid"):
+            _parse_bill_items([{"recordMonth": "202610", **invalid}])
+
+
+class TestQaBillPeriodValidation:
+    """账期必须整体合法，不能截掉损坏后缀再加入累计。"""
+
+    @pytest.mark.parametrize("period", ["204108garbage", "2041-08-99", "204108/13"])
+    def test_corrupt_period_rejects_entire_bill_result(self, period):
+        rows = [
+            {"recordMonth": "204108", "curQty": 1, "receivable": 3},
+            {"recordMonth": period, "curQty": 99, "receivable": 297},
+        ]
+        with pytest.raises(ZrGasApiError, match="invalid period"):
+            _parse_bill_items(rows)
+
+    @pytest.mark.parametrize("period", ["204108", "2041-08", "2041/08"])
+    def test_complete_supported_period_formats_remain_valid(self, period):
+        rows = [{"recordMonth": period, "curQty": 0, "receivable": 0}]
+        bill = _parse_bill_items(rows)[0]
+        assert (bill.period, bill.usage_volume, bill.usage_amount) == ("204108", 0, 0)
 
 
 class TestPayBillHistory:
@@ -621,6 +779,26 @@ class TestRealPayloadMappings:
         assert bills[0].usage_volume == 10.0  # 保留先出现的（2025 年）
 
     @pytest.mark.asyncio
+    async def test_money_list_fallback_keeps_same_month_rows_inside_canonical_slice(self):
+        fail = {"status": 2, "message": ""}
+        year_2040 = {
+            "status": 1,
+            "data": [
+                {"recordMonth": "204012", "curQty": "7", "receivable": "21"},
+                {"recordMonth": "204012", "curQty": "3", "receivable": "9"},
+            ],
+        }
+        year_2041 = {
+            "status": 1,
+            "data": [
+                {"recordMonth": "204012", "curQty": "7", "receivable": "21"},
+            ],
+        }
+        api = ZrGasMpApi(_FakeSession([fail, year_2040, year_2041]))
+        bills = await api.get_customer_money_list("C01", "204001", "204112")
+        assert [b.usage_volume for b in bills] == [7, 3]
+
+    @pytest.mark.asyncio
     async def test_money_list_fallback_single_year_failure_continues(self):
         """分年降级时单年失败不阻断其余年份。"""
         fail = {"status": 2, "message": ""}
@@ -781,7 +959,7 @@ class TestRealPayloadMappings:
 
         assert detail.max_gas == 9999.0
         assert detail.cust_type == "01"
-        assert detail.gas_price == 0.0  # price=null → 0（未知）
+        assert detail.gas_price is None  # price=null 保留未知，不伪造零单价
         assert detail.award_money == 0.0  # 真实 0
 
 
@@ -915,3 +1093,134 @@ class TestBindingLostLogThrottling:
 
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client", [ZrGasMpApi, ZrGasPayApi])
+async def test_year_slices_use_own_year_not_first_seen_rows(client):
+    from zr_gas.models import ZrGasBillHistory
+
+    fail = {"status": 2, "message": "temporary error"}
+    first = {
+        "status": 1,
+        "data": [
+            {"recordMonth": "204001", "curQty": 1, "received": 3},
+            {"recordMonth": "204108", "curQty": 999, "received": 999},
+        ],
+    }
+    second = {
+        "status": 1,
+        "data": [
+            {"recordMonth": "204108", "curQty": 2, "received": 6},
+            {"recordMonth": "204108", "curQty": 3, "received": 9},
+        ],
+    }
+    prefix = [fail] if client is ZrGasMpApi else []
+    api = client(_FakeSession([*prefix, first, second]))
+    bills = await api.get_customer_money_list("C01", "204001", "204112")
+    assert [bill.usage_volume for bill in bills] == [1, 2, 3]
+    api = client(_FakeSession([*prefix, first, fail]))
+    partial = await api.get_customer_money_list("C01", "204001", "204112")
+    assert isinstance(partial, ZrGasBillHistory)
+    assert partial.missing_years == {2041}
+    assert [bill.period for bill in partial] == ["204001"]
+
+
+@pytest.mark.parametrize("zero", [0, "0"])
+def test_bill_zero_does_not_select_conflicting_backup(zero):
+    bill = _parse_bill_items(
+        [
+            {
+                "recordMonth": "204108",
+                "curQty": zero,
+                "usageVolume": 99,
+                "receivable": zero,
+                "received": zero,
+                "gasFee": 99,
+                "price": zero,
+                "unitPrice": 99,
+            }
+        ]
+    )[0]
+    assert bill.usage_volume == bill.usage_amount == bill.unit_price == 0
+
+
+@pytest.mark.parametrize("zero", [0, "0"])
+def test_confirmed_zero_bill_needs_no_backup_fields(zero):
+    bill = _parse_bill_items([{"recordMonth": "204108", "curQty": zero, "receivable": zero}])[0]
+    assert bill.usage_volume == bill.usage_amount == 0
+    assert bill.unit_price is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client", [ZrGasMpApi, ZrGasPayApi])
+@pytest.mark.parametrize("bad_period", ["204103", "204108"])
+@pytest.mark.parametrize("missing_field", ["curQty", "receivable"])
+async def test_one_incomplete_bill_downgrades_current_and_annual_not_partial_totals(
+    client, bad_period, missing_field, monkeypatch
+):
+    from datetime import datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from zoneinfo import ZoneInfo
+
+    import zr_gas
+    from zr_gas.models import TierConfig, ZrGasCustomerDetail
+    from zr_gas.sensor import SENSOR_DESCRIPTIONS, ZrGasSensorEntity
+
+    rows = [
+        {"recordMonth": "204103", "curQty": 1, "receivable": 3},
+        {"recordMonth": "204108", "curQty": 2, "receivable": 6},
+        {"recordMonth": bad_period, "curQty": 5, "receivable": 15},
+    ]
+    rows[-1].pop(missing_field)
+    payload = {"status": 1, "data": rows}
+    replies = [payload] if client is ZrGasMpApi else [{"status": 1, "data": []}, payload]
+    api = client(_FakeSession(replies))
+    monkeypatch.setattr(
+        api,
+        "get_cust_info",
+        AsyncMock(
+            return_value=ZrGasCustomerDetail(
+                "C01",
+                "Example",
+                "",
+                0,
+                gas_price=3,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "get_meter_info", AsyncMock(return_value=None))
+    monkeypatch.setattr(api, "get_payment_log", AsyncMock(return_value=[]))
+    monkeypatch.setattr(api, "get_meter_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        zr_gas.dt_util, "now", lambda: datetime(2041, 11, 24, tzinfo=ZoneInfo("Asia/Shanghai"))
+    )
+    coordinator = zr_gas.ZrGasDataUpdateCoordinator(
+        SimpleNamespace(),
+        api,
+        api.source,
+        "C01",
+        "Example",
+        21600,
+        TierConfig(),
+        bill_years=1,
+    )
+    coordinator.data = await coordinator._async_update_data()
+    assert coordinator.data.bills_degraded is True
+    assert coordinator.data.monthly_stats == []
+    assert coordinator.data.yearly_stats == []
+    for desc in SENSOR_DESCRIPTIONS:
+        entity = ZrGasSensorEntity(coordinator, desc, "C01", "C01", api.source)
+        if desc.key in {
+            "monthly_usage",
+            "monthly_cost",
+            "last_month_usage",
+            "last_month_cost",
+            "annual_usage",
+            "annual_cost",
+            "tier_remaining",
+        }:
+            assert entity.native_value is None
+        elif desc.key == "gas_price":
+            assert entity.native_value == 3  # independent API price remains trustworthy

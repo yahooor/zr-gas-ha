@@ -45,7 +45,7 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     The API returns dates like "2026-04-21" or "2026-04-21 10:30:00".
     HA requires a timezone-aware datetime for TIMESTAMP device_class sensors.
     """
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     value = value.strip()
     if not value:
@@ -68,7 +68,7 @@ class ZrGasSensorEntityDescription(SensorEntityDescription):
     callback to extract the sensor value from coordinator data.
     """
 
-    value_fn: Callable[[ZrGasDeviceData], float | str | None]
+    value_fn: Callable[[ZrGasDeviceData], float | str | datetime | None]
     attributes_fn: Callable[[ZrGasDeviceData], dict[str, Any]] | None = None
 
 
@@ -114,6 +114,8 @@ def _stats_attributes(data: ZrGasDeviceData) -> dict[str, Any]:
     return {
         "monthly_stats": monthly_list,
         "yearly_stats": yearly_list,
+        "history_complete": not data.bills_degraded,
+        "missing_years": list(data.bill_missing_years),
     }
 
 
@@ -186,10 +188,18 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         native_unit_of_measurement="元/m³",
         icon="mdi:tag-outline",
         suggested_display_precision=2,
-        value_fn=lambda data: data.gas_price or None,
+        value_fn=lambda data: data.gas_price,
         attributes_fn=lambda data: {
             **_device_attributes(data),
-            "price_source": data.price_source or "api",
+            "price_source": data.price_source or "unknown",
+            "price_description": (
+                "推算单价"
+                if data.price_source == "derived"
+                else "接口单价"
+                if data.price_source == "api"
+                else "未知"
+            ),
+            "bill_period": data.period if data.price_source == "derived" else None,
         },
     ),
     ZrGasSensorEntityDescription(
@@ -199,7 +209,7 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
         icon="mdi:arrow-expand-vertical",
         suggested_display_precision=0,
-        value_fn=lambda data: data.max_gas or None,
+        value_fn=lambda data: data.max_gas,
         attributes_fn=lambda data: _device_attributes(data),
     ),
     ZrGasSensorEntityDescription(
@@ -223,9 +233,13 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
         icon="mdi:gas-cylinder",
-        suggested_display_precision=0,
-        value_fn=lambda data: data.qty_meter_balance,
-        attributes_fn=lambda data: _device_attributes(data),
+        suggested_display_precision=2,
+        value_fn=lambda data: data.meter_snapshot.volume if data.meter_snapshot else None,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "data_source": "queryLatestMeterInfo.effeGas",
+            "as_of": data.meter_snapshot.as_of.isoformat() if data.meter_snapshot else None,
+        },
     ),
     ZrGasSensorEntityDescription(
         key="purch_times",
@@ -246,6 +260,17 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
             "last_record": data.last_record,
         },
     ),
+    ZrGasSensorEntityDescription(
+        key="meter_snapshot_time",
+        translation_key="meter_snapshot_time",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        icon="mdi:clock-check-outline",
+        value_fn=lambda data: data.meter_snapshot.as_of if data.meter_snapshot else None,
+        attributes_fn=lambda data: {
+            **_device_attributes(data),
+            "data_source": "queryLatestMeterInfo.dataTime",
+        },
+    ),
     # ── 最近缴费（借鉴 hazr 的 getPaymentLogForHsh 端点） ──────────
     ZrGasSensorEntityDescription(
         key="last_payment",
@@ -254,15 +279,15 @@ SENSOR_DESCRIPTIONS: tuple[ZrGasSensorEntityDescription, ...] = (
         native_unit_of_measurement="CNY",
         icon="mdi:receipt-text-check",
         suggested_display_precision=2,
-        value_fn=lambda data: data.last_payment or None,
+        value_fn=lambda data: data.last_payment,
         attributes_fn=lambda data: {
             **_device_attributes(data),
             "last_payment_time": data.last_payment_time,
             "payment_history": [
                 {
                     "time": p.pay_time,
-                    "amount": round(p.amount, 2),
-                    "qty": round(p.qty, 2),
+                    "amount": round(p.amount, 2) if p.amount is not None else None,
+                    "qty": round(p.qty, 2) if p.qty is not None else None,
                     "type": p.pay_type,
                 }
                 for p in data.payment_history[:12]
@@ -427,7 +452,7 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
         return info
 
     @property
-    def native_value(self) -> float | str | None:
+    def native_value(self) -> float | str | datetime | None:
         """Return the sensor value extracted by value_fn.
 
         v2.2.3：账单接口降级时，账单派生字段返回 None（HA 显示 unavailable），
@@ -446,8 +471,11 @@ class ZrGasSensorEntity(CoordinatorEntity[ZrGasDataUpdateCoordinator], SensorEnt
         if self.coordinator.data is None:
             return {}
         if self.entity_description.attributes_fn is not None:
-            return self.entity_description.attributes_fn(self.coordinator.data)
-        return {}
+            return {
+                **self.entity_description.attributes_fn(self.coordinator.data),
+                "sensor_key": self.entity_description.key,
+            }
+        return {"sensor_key": self.entity_description.key}
 
 
 async def async_setup_entry(

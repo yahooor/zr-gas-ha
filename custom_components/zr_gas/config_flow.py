@@ -223,14 +223,14 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Validate token via check_token
                 try:
                     await self._api.check_token()
-                    # Token is valid, proceed to discovery
-                    return await self.async_step_discover()
                 except ZrGasAuthError as err:
                     _LOGGER.warning("Token validation failed: %s", err)
                     errors["base"] = "invalid_token"
                 except Exception as err:
                     _LOGGER.error("Token import error: %s", err)
                     errors["base"] = "connection_error"
+                else:
+                    return await self.async_step_discover()
 
         schema_fields: dict[Any, Any] = {
             vol.Required(CONF_ACCESS_TOKEN): str,
@@ -329,14 +329,14 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     await self._api.login_with_sms(self._mobile, sms_code)
-                    # Login successful — proceed to account discovery
-                    return await self.async_step_discover()
                 except ZrGasAuthError as err:
                     _LOGGER.warning("SMS login failed: %s", err)
                     errors["base"] = "invalid_sms_code"
                 except Exception as err:
                     _LOGGER.error("Unexpected error during login: %s", err)
                     errors["base"] = "connection_error"
+                else:
+                    return await self.async_step_discover()
 
         return self.async_show_form(
             step_id="sms_code",
@@ -402,13 +402,10 @@ class ZrGasConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         primary_name = f"{source_label} {customers[0].cust_name or '中燃在线'}"
         user_id = self._api.user_id or self._mobile
 
-        # Deduplicate by source + user_id (mobile number)
+        # Close login cookies before a possible already_configured abort.
+        await self._api.close_login_session()
         await self.async_set_unique_id(f"{self._source}_{user_id}")
         self._abort_if_unique_id_configured()
-
-        # Close the independent login session
-        if self._api:
-            await self._api.close_login_session()
 
         return self.async_create_entry(
             title=primary_name,

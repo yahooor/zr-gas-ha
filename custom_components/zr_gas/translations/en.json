@@ -116,10 +116,10 @@
         "name": "Balance"
       },
       "monthly_usage": {
-        "name": "Monthly usage"
+        "name": "Current period usage"
       },
       "monthly_cost": {
-        "name": "Monthly cost"
+        "name": "Current period cost"
       },
       "owe_money": {
         "name": "Amount owed"
@@ -137,7 +137,7 @@
         "name": "Meter reading"
       },
       "qty_meter_balance": {
-        "name": "Gas volume balance"
+        "name": "In-meter gas volume"
       },
       "purch_times": {
         "name": "Purchase count"
@@ -145,14 +145,17 @@
       "last_record_time": {
         "name": "Last reading date"
       },
+      "meter_snapshot_time": {
+        "name": "Data cutoff time"
+      },
       "last_payment": {
         "name": "Last payment"
       },
       "last_month_usage": {
-        "name": "Last month usage"
+        "name": "Previous period usage"
       },
       "last_month_cost": {
-        "name": "Last month cost"
+        "name": "Previous period cost"
       },
       "annual_cost": {
         "name": "Annual cost"

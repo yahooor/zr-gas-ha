@@ -323,6 +323,30 @@ class TestPickBills:
         assert prev.usage_volume == 49
         assert prev.period == "202605"
 
+    def test_pick_periods_aggregates_rows_and_excludes_non_previous_month(self):
+        bills = [
+            self._b("204103", 8, 26),
+            self._b("204103", 3, 11),
+            self._b("204108", 1, 3),
+            self._b("204108", 9, 27),
+            self._b("204112", 90, 900),
+        ]
+        matched, prev = _pick_bills(bills, "204108")
+        assert (matched.period, matched.usage_volume, matched.usage_amount) == ("204108", 10, 30)
+        assert (prev.period, prev.usage_volume, prev.usage_amount) == ("204103", 11, 37)
+        latest, _ = _pick_bills(bills, "204109")
+        assert latest.period == "204108"
+
+    def test_eighteen_rows_seventeen_periods_previous_is_august(self):
+        periods = [f"2040{month:02d}" for month in range(1, 13)]
+        periods.extend(["204101", "204102", "204105", "204108", "204111"])
+        bills = [self._b(period, 1, 3) for period in periods]
+        bills.append(self._b("204111", 2, 6))
+        assert len(bills) == 18 and len({bill.period for bill in bills}) == 17
+        matched, previous = _pick_bills(bills, "204111")
+        assert matched.period == "204111" and matched.usage_volume == 3
+        assert previous.period == "204108" and previous.usage_volume == 1
+
     def test_single_bill_no_previous(self):
         matched, prev = _pick_bills([self._b("202608", 73, 300.03)], "202610")
         assert matched.usage_volume == 73
@@ -343,3 +367,109 @@ class TestAnnualSummaryCost:
         assert summary.usage == pytest.approx(122.0)
         assert summary.cost == pytest.approx(501.42)
         assert summary.tier == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "snapshot_error", [None, TimeoutError(), zr_gas.ZrGasApiError("unavailable")]
+)
+@pytest.mark.parametrize("api_price", [None, 0])
+async def test_coordinator_real_refresh_snapshot_failure_never_uses_crm(snapshot_error, api_price):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from zr_gas.models import ZrGasCustomerDetail, ZrGasMeterSnapshot, ZrGasPayment
+
+    as_of = datetime(2041, 2, 12, 4, 5, 6, tzinfo=ZoneInfo("Asia/Shanghai"))
+    api = SimpleNamespace(
+        get_cust_info=AsyncMock(
+            return_value=ZrGasCustomerDetail(
+                "C01",
+                "Example",
+                "",
+                0,
+                qty_meter_balance=1249,
+                last_record_time="2040-12-01",
+                gas_price=api_price,
+            )
+        ),
+        get_customer_money_list=AsyncMock(
+            return_value=[
+                ZrGasBill("204103", 3, 9, None),
+                ZrGasBill("204108", 8, 24, None),
+                ZrGasBill("204108", 2, 6, None),
+            ]
+        ),
+        get_meter_info=AsyncMock(return_value=None),
+        get_payment_log=AsyncMock(return_value=[ZrGasPayment(amount=0, qty=None)]),
+        get_meter_snapshot=AsyncMock(
+            return_value=ZrGasMeterSnapshot(39.42, as_of), side_effect=snapshot_error
+        ),
+    )
+    coordinator = zr_gas.ZrGasDataUpdateCoordinator(
+        SimpleNamespace(),
+        api,
+        "mp",
+        "C01",
+        "Example",
+        21600,
+        TierConfig(),
+    )
+    with patch("zr_gas.dt_util.now", return_value=datetime(2041, 11, 24, tzinfo=as_of.tzinfo)):
+        data = await coordinator._async_update_data()
+    assert data.monthly_usage == 10 and data.last_month_usage == 3
+    assert data.period == "204108" and data.last_bill_period == "204103"
+    assert data.gas_price == (3 if api_price is None else 0)
+    assert data.price_source == ("derived" if api_price is None else "api")
+    assert data.last_payment == 0 and data.payment_history[0].qty is None
+    if snapshot_error:
+        assert data.meter_snapshot is None
+    else:
+        assert data.meter_snapshot.volume == 39.42
+        assert data.meter_snapshot.as_of == as_of
+
+
+@pytest.mark.asyncio
+async def test_partial_history_marks_derived_values_untrusted():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from zr_gas.models import ZrGasBillHistory, ZrGasCustomerDetail, is_bill_derived_unavailable
+
+    api = SimpleNamespace(
+        get_cust_info=AsyncMock(return_value=ZrGasCustomerDetail("C01", "Example", "", None)),
+        get_customer_money_list=AsyncMock(
+            return_value=ZrGasBillHistory(
+                [
+                    ZrGasBill("204103", 3, 9, 3),
+                ],
+                {2040},
+            )
+        ),
+        get_meter_info=AsyncMock(return_value=None),
+        get_payment_log=AsyncMock(return_value=[]),
+        get_meter_snapshot=AsyncMock(return_value=None),
+    )
+    coordinator = zr_gas.ZrGasDataUpdateCoordinator(
+        SimpleNamespace(),
+        api,
+        "mp",
+        "C01",
+        "Example",
+        21600,
+        TierConfig(),
+    )
+    with patch(
+        "zr_gas.dt_util.now", return_value=datetime(2041, 11, 24, tzinfo=ZoneInfo("Asia/Shanghai"))
+    ):
+        data = await coordinator._async_update_data()
+    assert data.bills_degraded is True and data.bill_missing_years == (2040,)
+    assert data.price_source == "" and data.gas_price is None
+    for key in (
+        "monthly_usage",
+        "last_month_usage",
+        "annual_usage",
+        "annual_cost",
+        "tier_remaining",
+    ):
+        assert is_bill_derived_unavailable(data, key)

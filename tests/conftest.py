@@ -98,7 +98,26 @@ def _setup_ha_mocks():
         },
     )
     sensor_mod.SensorEntity = type("SensorEntity", (), {})
-    sensor_mod.SensorEntityDescription = type("SensorEntityDescription", (), {})
+    from dataclasses import make_dataclass
+    from typing import Any
+
+    sensor_mod.SensorEntityDescription = make_dataclass(
+        "SensorEntityDescription",
+        [
+            (name, Any, None)
+            for name in (
+                "key",
+                "translation_key",
+                "device_class",
+                "state_class",
+                "native_unit_of_measurement",
+                "icon",
+                "suggested_display_precision",
+            )
+        ],
+        frozen=True,
+        kw_only=True,
+    )
     sensor_mod.SensorStateClass = type(
         "SensorStateClass",
         (),
@@ -119,8 +138,19 @@ def _setup_ha_mocks():
         def __class_getitem__(cls, item):
             return cls
 
+    def _coordinator_init(self, hass, **kwargs):
+        self.hass = hass
+        self.data = None
+        self.update_interval = kwargs.get("update_interval")
+
+    def _entity_init(self, coordinator):
+        self.coordinator = coordinator
+
+    submods["homeassistant.helpers.update_coordinator"].CoordinatorEntity = type(
+        "CoordinatorEntity", (_GenericBase,), {"__init__": _entity_init}
+    )
     submods["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = type(
-        "DataUpdateCoordinator", (_GenericBase,), {}
+        "DataUpdateCoordinator", (_GenericBase,), {"__init__": _coordinator_init}
     )
     submods["homeassistant.helpers.update_coordinator"].UpdateFailed = type(
         "UpdateFailed", (Exception,), {}

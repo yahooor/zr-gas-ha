@@ -116,10 +116,10 @@
         "name": "余额"
       },
       "monthly_usage": {
-        "name": "月用量"
+        "name": "本期用气量"
       },
       "monthly_cost": {
-        "name": "月费用"
+        "name": "本期费用"
       },
       "owe_money": {
         "name": "欠费金额"
@@ -137,7 +137,7 @@
         "name": "表读数"
       },
       "qty_meter_balance": {
-        "name": "气量余额"
+        "name": "表内气量"
       },
       "purch_times": {
         "name": "购气次数"
@@ -145,14 +145,17 @@
       "last_record_time": {
         "name": "最后抄表日期"
       },
+      "meter_snapshot_time": {
+        "name": "截止时间"
+      },
       "last_payment": {
         "name": "最近缴费"
       },
       "last_month_usage": {
-        "name": "上月用气量"
+        "name": "上期用气量"
       },
       "last_month_cost": {
-        "name": "上月费用"
+        "name": "上期费用"
       },
       "annual_cost": {
         "name": "年度累计费用"
